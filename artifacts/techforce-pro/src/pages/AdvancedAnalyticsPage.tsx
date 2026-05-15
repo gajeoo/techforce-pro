@@ -3,6 +3,7 @@ import {
   TrendingUp, TrendingDown, Users, Briefcase, DollarSign, Target,
   BarChart3, Zap, AlertCircle, Eye, EyeOff, Download, Loader2,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -86,6 +87,11 @@ export default function AdvancedAnalyticsPage() {
       : [],
     [jobMetrics, employeePerformance, customerMetrics]
   );
+  const averageUtilization = useMemo(() => {
+    if (employeePerformance.length === 0) return 0;
+    const total = employeePerformance.reduce((sum, emp) => sum + (emp.utilization || 0), 0);
+    return total / employeePerformance.length;
+  }, [employeePerformance]);
 
   const handleExport = (format: "csv" | "json" | "html") => {
     const timestamp = new Date().toISOString().split("T")[0];
@@ -95,7 +101,7 @@ export default function AdvancedAnalyticsPage() {
       exportToCSV(employeePerformance, filename);
     } else if (format === "json") {
       exportToJSON(
-        { summary, metrics: { jobs: jobMetrics, revenue: revenueMetrics }, employees: employeePerformance },
+        [{ summary, metrics: { jobs: jobMetrics, revenue: revenueMetrics }, employees: employeePerformance }],
         filename
       );
     }
@@ -163,7 +169,7 @@ export default function AdvancedAnalyticsPage() {
           icon={Briefcase}
           label="Job Completion Rate"
           value={`${(jobMetrics?.completionRate || 0).toFixed(1)}%`}
-          trend={jobMetrics?.completionRate || 0 > 75 ? "up" : "down"}
+          trend={(jobMetrics?.completionRate || 0) > 75 ? "up" : "down"}
           target={80}
           current={jobMetrics?.completionRate || 0}
         />
@@ -177,16 +183,16 @@ export default function AdvancedAnalyticsPage() {
         <MetricCard
           icon={Users}
           label="Team Utilization"
-          value={`${((employeePerformance[0]?.utilization || 0) / employeePerformance.length).toFixed(1)}%`}
+          value={`${averageUtilization.toFixed(1)}%`}
           trend="up"
           target={85}
-          current={(employeePerformance[0]?.utilization || 0) / employeePerformance.length}
+          current={averageUtilization}
         />
         <MetricCard
           icon={Target}
           label="On-Time Delivery"
           value={`${(jobMetrics?.onTimeRate || 0).toFixed(1)}%`}
-          trend={jobMetrics?.onTimeRate || 0 > 80 ? "up" : "down"}
+          trend={(jobMetrics?.onTimeRate || 0) > 80 ? "up" : "down"}
           target={90}
           current={jobMetrics?.onTimeRate || 0}
         />
@@ -356,7 +362,7 @@ export default function AdvancedAnalyticsPage() {
 // ─── Metric Card Component ────────────────────────────────────────────────────
 
 interface MetricCardProps {
-  icon: React.ReactNode;
+  icon: LucideIcon;
   label: string;
   value: string;
   trend?: "up" | "down";
@@ -374,7 +380,7 @@ function MetricCard({ icon: Icon, label, value, trend, subtitle, target, current
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">{label}</p>
-            {typeof Icon === "function" && <Icon className="h-4 w-4 text-muted-foreground" />}
+            <Icon className="h-4 w-4 text-muted-foreground" />
           </div>
           
           <div className="flex items-baseline gap-2">

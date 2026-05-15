@@ -215,9 +215,9 @@ router.post("/reports/generate", async (req, res) => {
       url: `/api/reports/download/${type}-${Date.now()}.${format}`,
     };
 
-    res.json(reportData);
+    return res.json(reportData);
   } catch (err) {
-    res.status(500).json({ error: "Failed to generate report", detail: err instanceof Error ? err.message : String(err) });
+    return res.status(500).json({ error: "Failed to generate report", detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -267,9 +267,9 @@ router.post("/notifications/send", async (req, res) => {
       read: false,
     };
 
-    res.json({ success: true, notification });
+    return res.json({ success: true, notification });
   } catch (err) {
-    res.status(500).json({ error: "Failed to send notification", detail: err instanceof Error ? err.message : String(err) });
+    return res.status(500).json({ error: "Failed to send notification", detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
