@@ -1,48 +1,7 @@
 import { Router } from "express";
-import { db } from "@workspace/db";
-import {
-  employeesTable,
-  customersTable,
-  customerLocationsTable,
-  customerPricingTable,
-  jobsTable,
-  openJobsTable,
-  invoicesTable,
-  invoiceTemplateTable,
-  recurringSchedulesTable,
-  timeOffRequestsTable,
-  appointments,
-  tasksTable,
-  serviceRequestsTable,
-  vansTable,
-  messages,
-  conversations,
-} from "@workspace/db";
+import { convex } from "../lib/convex";
 
 const router = Router();
-
-async function clearAllDataTables() {
-  // Delete dependent rows first, then parent rows.
-  await db.delete(messages);
-  await db.delete(conversations);
-
-  await db.delete(invoicesTable);
-  await db.delete(invoiceTemplateTable);
-  await db.delete(recurringSchedulesTable);
-  await db.delete(jobsTable);
-  await db.delete(openJobsTable);
-
-  await db.delete(timeOffRequestsTable);
-  await db.delete(appointments);
-  await db.delete(tasksTable);
-  await db.delete(serviceRequestsTable);
-  await db.delete(vansTable);
-
-  await db.delete(customerPricingTable);
-  await db.delete(customerLocationsTable);
-  await db.delete(customersTable);
-  await db.delete(employeesTable);
-}
 
 // ─── Seed Demo Data ──────────────────────────────────────────────────────────
 

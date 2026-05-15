@@ -16,12 +16,14 @@ import openaiRouter from "./openai-chat";
 import tasksRouter from "./tasks";
 import serviceRequestsRouter from "./service-requests";
 import vansRouter from "./vans";
+import analyticsRouter from "./analytics";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
 router.use(adminRouter);
 router.use(dashboardRouter);
+router.use(analyticsRouter);
 router.use(employeesRouter);
 router.use(customersRouter);
 // open-jobs and returns/reschedules BEFORE /:id
