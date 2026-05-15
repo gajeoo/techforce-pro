@@ -1,0 +1,14 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "L1eS4kBAhucZ558nLI4pA"
+uri = "file://techforce-pro.tar.gz"
+type = "unspecified"
+title = "TechForce Pro — Full Source Code (tar.gz)"
+
+[[outputs]]
+id = "dbrxvjgyFxq9ovdNrXFbu"
+uri = "file://techforce-pro.zip"
+type = "unspecified"
+title = "TechForce Pro — Full Source Code"

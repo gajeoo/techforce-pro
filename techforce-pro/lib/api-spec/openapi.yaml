@@ -1,0 +1,2375 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.2.0
+  description: FieldCommand — Premium fire protection field service management platform
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: auth
+    description: Portal authentication and invites
+  - name: dashboard
+    description: Dashboard analytics and KPIs
+  - name: employees
+    description: Employee management
+  - name: customers
+    description: Customer management
+  - name: jobs
+    description: Job management and dispatch
+  - name: estimates
+    description: Estimates and quotes
+  - name: invoices
+    description: Invoice and payment management
+  - name: schedules
+    description: Scheduling and dispatch
+  - name: messages
+    description: Internal messaging between roles
+  - name: timeoff
+    description: Time-off and shop day requests
+  - name: profitability
+    description: P&L engine and shop day calculator
+  - name: activity
+    description: Activity feed and audit log
+  - name: appointments
+    description: Appointment and meeting management
+  - name: openai
+    description: AI assistant conversations
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  # ── AUTH / PORTAL ────────────────────────────────────────────────────────────
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Get current session user info
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionUser"
+
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Login with portal credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginInput"
+      responses:
+        "200":
+          description: Session user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionUser"
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Log out current session
+      responses:
+        "200":
+          description: Logged out
+
+  /auth/invites:
+    get:
+      operationId: listInvites
+      tags: [auth]
+      summary: List all portal invites (manager only)
+      responses:
+        "200":
+          description: Invites
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invite"
+    post:
+      operationId: createInvite
+      tags: [auth]
+      summary: Send a portal invite to a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteInput"
+      responses:
+        "201":
+          description: Created invite
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invite"
+
+  /auth/invites/{token}/accept:
+    post:
+      operationId: acceptInvite
+      tags: [auth]
+      summary: Accept an invite and create a portal account
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptInviteInput"
+      responses:
+        "200":
+          description: Session user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionUser"
+
+  # ── DASHBOARD ────────────────────────────────────────────────────────────────
+  /dashboard/summary:
+    get:
+      operationId: getDashboardSummary
+      tags: [dashboard]
+      summary: Manager KPI summary
+      responses:
+        "200":
+          description: Dashboard summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardSummary"
+
+  /dashboard/revenue-by-service:
+    get:
+      operationId: getRevenueByService
+      tags: [dashboard]
+      summary: Revenue breakdown by service type
+      responses:
+        "200":
+          description: Revenue by service
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RevenueByService"
+
+  /dashboard/employee-roi:
+    get:
+      operationId: getEmployeeRoi
+      tags: [dashboard]
+      summary: Per-employee ROI report
+      responses:
+        "200":
+          description: Employee ROI rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EmployeeRoi"
+
+  /dashboard/jobs-by-status:
+    get:
+      operationId: getJobsByStatus
+      tags: [dashboard]
+      summary: Job counts grouped by status
+      responses:
+        "200":
+          description: Jobs by status
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JobStatusCount"
+
+  /dashboard/upcoming-jobs:
+    get:
+      operationId: getUpcomingJobs
+      tags: [dashboard]
+      summary: Next 7 days of scheduled jobs
+      responses:
+        "200":
+          description: Upcoming jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Job"
+
+  # ── ACTIVITY FEED ─────────────────────────────────────────────────────────────
+  /activity:
+    get:
+      operationId: listActivity
+      tags: [activity]
+      summary: Recent activity log (all portals — filtered by role server-side)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: userId
+          in: query
+          schema:
+            type: ["integer", "null"]
+      responses:
+        "200":
+          description: Activity items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityItem"
+
+  # ── EMPLOYEES ────────────────────────────────────────────────────────────────
+  /employees:
+    get:
+      operationId: listEmployees
+      tags: [employees]
+      summary: List all employees
+      responses:
+        "200":
+          description: Employees
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Employee"
+    post:
+      operationId: createEmployee
+      tags: [employees]
+      summary: Create employee
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmployeeInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Employee"
+
+  /employees/{id}:
+    get:
+      operationId: getEmployee
+      tags: [employees]
+      summary: Get employee by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Employee
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Employee"
+    patch:
+      operationId: updateEmployee
+      tags: [employees]
+      summary: Update employee
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmployeeUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Employee"
+    delete:
+      operationId: deleteEmployee
+      tags: [employees]
+      summary: Delete employee
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /employees/{id}/schedule:
+    get:
+      operationId: getEmployeeSchedule
+      tags: [employees]
+      summary: Get employee jobs for a date range
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: date
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Job"
+
+  # ── CUSTOMERS ────────────────────────────────────────────────────────────────
+  /customers:
+    get:
+      operationId: listCustomers
+      tags: [customers]
+      summary: List all customers
+      responses:
+        "200":
+          description: Customers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Customer"
+    post:
+      operationId: createCustomer
+      tags: [customers]
+      summary: Create customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+
+  /customers/{id}:
+    get:
+      operationId: getCustomer
+      tags: [customers]
+      summary: Get customer by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Customer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+    patch:
+      operationId: updateCustomer
+      tags: [customers]
+      summary: Update customer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+    delete:
+      operationId: deleteCustomer
+      tags: [customers]
+      summary: Delete customer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /customers/{id}/jobs:
+    get:
+      operationId: getCustomerJobs
+      tags: [customers]
+      summary: All jobs for a customer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Job"
+
+  /customers/{id}/invoices:
+    get:
+      operationId: getCustomerInvoices
+      tags: [customers]
+      summary: All invoices for a customer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Invoices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invoice"
+
+  # ── JOBS ─────────────────────────────────────────────────────────────────────
+  /jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      summary: List jobs with optional filters
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: employeeId
+          in: query
+          schema:
+            type: ["integer", "null"]
+        - name: customerId
+          in: query
+          schema:
+            type: ["integer", "null"]
+        - name: date
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Job"
+    post:
+      operationId: createJob
+      tags: [jobs]
+      summary: Create job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Get job by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+    patch:
+      operationId: updateJob
+      tags: [jobs]
+      summary: Update job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+    delete:
+      operationId: deleteJob
+      tags: [jobs]
+      summary: Delete job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /jobs/dispatch:
+    get:
+      operationId: getDispatchBoard
+      tags: [jobs]
+      summary: Get dispatch board — all techs with their jobs for a date
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dispatch board rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DispatchRow"
+
+  # ── ESTIMATES ────────────────────────────────────────────────────────────────
+  /estimates:
+    get:
+      operationId: listEstimates
+      tags: [estimates]
+      summary: List all estimates
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: customerId
+          in: query
+          schema:
+            type: ["integer", "null"]
+      responses:
+        "200":
+          description: Estimates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Estimate"
+    post:
+      operationId: createEstimate
+      tags: [estimates]
+      summary: Create estimate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EstimateInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Estimate"
+
+  /estimates/{id}:
+    get:
+      operationId: getEstimate
+      tags: [estimates]
+      summary: Get estimate by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Estimate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Estimate"
+    patch:
+      operationId: updateEstimate
+      tags: [estimates]
+      summary: Update estimate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EstimateUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Estimate"
+    delete:
+      operationId: deleteEstimate
+      tags: [estimates]
+      summary: Delete estimate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /estimates/{id}/convert:
+    post:
+      operationId: convertEstimateToJob
+      tags: [estimates]
+      summary: Convert accepted estimate to a job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Created job from estimate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+
+  # ── RECURRING SCHEDULES ──────────────────────────────────────────────────────
+  /recurring-schedules:
+    get:
+      operationId: listRecurringSchedules
+      tags: [jobs]
+      summary: List all recurring job schedules
+      responses:
+        "200":
+          description: Recurring schedules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RecurringSchedule"
+    post:
+      operationId: createRecurringSchedule
+      tags: [jobs]
+      summary: Create a recurring job schedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecurringScheduleInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecurringSchedule"
+
+  /recurring-schedules/{id}:
+    get:
+      operationId: getRecurringSchedule
+      tags: [jobs]
+      summary: Get recurring schedule by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Recurring schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecurringSchedule"
+    put:
+      operationId: updateRecurringSchedule
+      tags: [jobs]
+      summary: Update recurring schedule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecurringScheduleUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecurringSchedule"
+    delete:
+      operationId: deleteRecurringSchedule
+      tags: [jobs]
+      summary: Delete recurring schedule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /recurring-schedules/{id}/pause:
+    post:
+      operationId: pauseRecurringSchedule
+      tags: [jobs]
+      summary: Pause a recurring schedule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Paused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecurringSchedule"
+
+  /recurring-schedules/{id}/resume:
+    post:
+      operationId: resumeRecurringSchedule
+      tags: [jobs]
+      summary: Resume a paused recurring schedule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Resumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecurringSchedule"
+
+  # ── INVOICES ─────────────────────────────────────────────────────────────────
+  /invoices:
+    get:
+      operationId: listInvoices
+      tags: [invoices]
+      summary: List all invoices
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: customerId
+          in: query
+          schema:
+            type: ["integer", "null"]
+      responses:
+        "200":
+          description: Invoices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invoice"
+    post:
+      operationId: createInvoice
+      tags: [invoices]
+      summary: Create invoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvoiceInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+
+  /invoices/{id}:
+    get:
+      operationId: getInvoice
+      tags: [invoices]
+      summary: Get invoice by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Invoice
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+    patch:
+      operationId: updateInvoice
+      tags: [invoices]
+      summary: Update invoice status or details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvoiceUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+
+  /invoices/{id}/record-payment:
+    post:
+      operationId: recordPayment
+      tags: [invoices]
+      summary: Record payment for an invoice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentInput"
+      responses:
+        "200":
+          description: Updated invoice
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+
+  # ── SCHEDULES ────────────────────────────────────────────────────────────────
+  /schedules:
+    get:
+      operationId: listSchedules
+      tags: [schedules]
+      summary: Get schedule entries for a week
+      parameters:
+        - name: weekStart
+          in: query
+          schema:
+            type: string
+        - name: employeeId
+          in: query
+          schema:
+            type: ["integer", "null"]
+      responses:
+        "200":
+          description: Schedule entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScheduleEntry"
+
+  /schedules/auto-assign:
+    post:
+      operationId: autoAssignJobs
+      tags: [schedules]
+      summary: Auto-assign open jobs to eligible techs
+      responses:
+        "200":
+          description: Assignment results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutoAssignResult"
+
+  # ── MESSAGES ─────────────────────────────────────────────────────────────────
+  /messages:
+    get:
+      operationId: listMessages
+      tags: [messages]
+      summary: List messages for the current user
+      parameters:
+        - name: threadId
+          in: query
+          schema:
+            type: ["integer", "null"]
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+    post:
+      operationId: sendMessage
+      tags: [messages]
+      summary: Send a message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageInput"
+      responses:
+        "201":
+          description: Sent message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+
+  /messages/threads:
+    get:
+      operationId: listThreads
+      tags: [messages]
+      summary: List message threads for the current user
+      responses:
+        "200":
+          description: Threads
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Thread"
+
+  /messages/unread-count:
+    get:
+      operationId: getUnreadCount
+      tags: [messages]
+      summary: Get unread message count for current user
+      responses:
+        "200":
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnreadCount"
+
+  # ── TIME OFF ─────────────────────────────────────────────────────────────────
+  /timeoff:
+    get:
+      operationId: listTimeoff
+      tags: [timeoff]
+      summary: List time-off / shop day requests
+      parameters:
+        - name: employeeId
+          in: query
+          schema:
+            type: ["integer", "null"]
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TimeoffRequest"
+    post:
+      operationId: createTimeoff
+      tags: [timeoff]
+      summary: Submit time-off or shop day request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TimeoffInput"
+      responses:
+        "201":
+          description: Request created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TimeoffRequest"
+
+  /timeoff/{id}/review:
+    post:
+      operationId: reviewTimeoff
+      tags: [timeoff]
+      summary: Manager approves or denies a time-off request
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TimeoffReviewInput"
+      responses:
+        "200":
+          description: Updated request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TimeoffRequest"
+
+  # ── PROFITABILITY ────────────────────────────────────────────────────────────
+  /profitability/summary:
+    get:
+      operationId: getProfitabilitySummary
+      tags: [profitability]
+      summary: Weekly P&L summary for all employees
+      parameters:
+        - name: weekStart
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: P&L rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProfitRow"
+
+  /profitability/shop-calculator:
+    get:
+      operationId: getShopCalculator
+      tags: [profitability]
+      summary: Shop day allowance data for all employees
+      responses:
+        "200":
+          description: Shop day data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ShopDayRow"
+
+  # ── APPOINTMENTS ─────────────────────────────────────────────────────────────
+  /appointments:
+    get:
+      operationId: listAppointments
+      tags: [appointments]
+      summary: List all appointments
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of appointments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Appointment"
+    post:
+      operationId: createAppointment
+      tags: [appointments]
+      summary: Create a new appointment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppointmentBody"
+      responses:
+        "201":
+          description: Created appointment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Appointment"
+  /appointments/{id}:
+    put:
+      operationId: updateAppointment
+      tags: [appointments]
+      summary: Update an appointment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAppointmentBody"
+      responses:
+        "200":
+          description: Updated appointment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Appointment"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteAppointment
+      tags: [appointments]
+      summary: Delete an appointment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found
+
+  # ── OPENAI ───────────────────────────────────────────────────────────────────
+  /openai/conversations:
+    get:
+      operationId: listOpenaiConversations
+      tags: [openai]
+      summary: List all conversations
+      responses:
+        "200":
+          description: List of conversations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OpenaiConversation"
+    post:
+      operationId: createOpenaiConversation
+      tags: [openai]
+      summary: Create a new conversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOpenaiConversationBody"
+      responses:
+        "201":
+          description: Created conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenaiConversation"
+  /openai/conversations/{id}/messages:
+    post:
+      operationId: sendOpenaiMessage
+      tags: [openai]
+      summary: Send a text message and receive a streaming response
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendOpenaiMessageBody"
+      responses:
+        "200":
+          description: SSE stream of assistant text chunks
+          content:
+            text/event-stream: {}
+
+# ── SCHEMAS ───────────────────────────────────────────────────────────────────
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    SessionUser:
+      type: object
+      required: [id, name, email, role]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+          enum: [manager, supervisor, technician, customer]
+        employeeId:
+          type: ["integer", "null"]
+        customerId:
+          type: ["integer", "null"]
+        avatarInitials:
+          type: string
+
+    LoginInput:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+
+    Invite:
+      type: object
+      required: [id, email, role, status, token, createdAt]
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        role:
+          type: string
+          enum: [supervisor, technician, customer]
+        status:
+          type: string
+          enum: [pending, accepted, expired]
+        token:
+          type: string
+        linkedId:
+          type: ["integer", "null"]
+        linkedName:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    InviteInput:
+      type: object
+      required: [email, role]
+      properties:
+        email:
+          type: string
+        role:
+          type: string
+          enum: [supervisor, technician, customer]
+        linkedId:
+          type: ["integer", "null"]
+
+    AcceptInviteInput:
+      type: object
+      required: [name, password]
+      properties:
+        name:
+          type: string
+        password:
+          type: string
+
+    DashboardSummary:
+      type: object
+      required: [jobsToday, revenue30d, outstanding, techsActive, estimatesOpen, overdueInvoices, utilization, completedThisWeek]
+      properties:
+        jobsToday:
+          type: integer
+        revenue30d:
+          type: number
+        outstanding:
+          type: number
+        techsActive:
+          type: integer
+        estimatesOpen:
+          type: integer
+        overdueInvoices:
+          type: integer
+        utilization:
+          type: number
+        completedThisWeek:
+          type: integer
+
+    RevenueByService:
+      type: object
+      required: [serviceType, revenue, jobCount]
+      properties:
+        serviceType:
+          type: string
+        revenue:
+          type: number
+        jobCount:
+          type: integer
+
+    EmployeeRoi:
+      type: object
+      required: [employeeId, name, role, revenue, burdenCost, profit, margin, jobCount]
+      properties:
+        employeeId:
+          type: integer
+        name:
+          type: string
+        role:
+          type: string
+        revenue:
+          type: number
+        burdenCost:
+          type: number
+        profit:
+          type: number
+        margin:
+          type: number
+        jobCount:
+          type: integer
+
+    JobStatusCount:
+      type: object
+      required: [status, count]
+      properties:
+        status:
+          type: string
+        count:
+          type: integer
+
+    ActivityItem:
+      type: object
+      required: [id, type, description, createdAt, actorName, actorRole]
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+        description:
+          type: string
+        createdAt:
+          type: string
+        actorName:
+          type: string
+        actorRole:
+          type: string
+        linkedId:
+          type: ["integer", "null"]
+        linkedType:
+          type: ["string", "null"]
+
+    Employee:
+      type: object
+      required: [id, name, role, certType, salary, billableRate, shopDaysAllowed, shopDaysUsedYtd, utilizationPct, status]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        role:
+          type: string
+        certType:
+          type: string
+          enum: [suppression, sprinkler, extinguisher, helper, admin]
+        salary:
+          type: number
+        billableRate:
+          type: number
+        shopDaysAllowed:
+          type: integer
+        shopDaysUsedYtd:
+          type: integer
+        allowedTrainingDays:
+          type: integer
+        trainingDaysUsedYtd:
+          type: integer
+        utilizationPct:
+          type: number
+        status:
+          type: string
+          enum: [active, inactive]
+        hireDate:
+          type: string
+        notes:
+          type: string
+
+    EmployeeInput:
+      type: object
+      required: [name, role, certType, salary, billableRate]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        role:
+          type: string
+        certType:
+          type: string
+          enum: [suppression, sprinkler, extinguisher, helper, admin]
+        salary:
+          type: number
+        billableRate:
+          type: number
+        shopDaysAllowed:
+          type: integer
+        hireDate:
+          type: string
+        notes:
+          type: string
+
+    EmployeeUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        role:
+          type: string
+        certType:
+          type: string
+        salary:
+          type: number
+        billableRate:
+          type: number
+        shopDaysAllowed:
+          type: integer
+        shopDaysUsedYtd:
+          type: integer
+        allowedTrainingDays:
+          type: integer
+        trainingDaysUsedYtd:
+          type: integer
+        utilizationPct:
+          type: number
+        status:
+          type: string
+        notes:
+          type: string
+
+    Customer:
+      type: object
+      required: [id, name, type, contact, phone, email, address, contractStatus, revenueYtd, jobCount]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        type:
+          type: string
+          enum: [Restaurant, School, Commercial, "Group Home", Condo, Government, Healthcare, Industrial]
+        contact:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        address:
+          type: string
+        contractStatus:
+          type: string
+          enum: [active, expiring, pending]
+        contractExpiry:
+          type: ["string", "null"]
+        revenueYtd:
+          type: number
+        jobCount:
+          type: integer
+        extinguisherRate:
+          type: ["string", "null"]
+        suppressionRate:
+          type: ["string", "null"]
+        sprinklerRate:
+          type: ["string", "null"]
+        exitLightRate:
+          type: ["string", "null"]
+        notes:
+          type: string
+
+    CustomerInput:
+      type: object
+      required: [name, type, contact, phone, email, address]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        contact:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        address:
+          type: string
+        contractStatus:
+          type: string
+        contractExpiry:
+          type: ["string", "null"]
+        extinguisherRate:
+          type: ["string", "null"]
+        suppressionRate:
+          type: ["string", "null"]
+        sprinklerRate:
+          type: ["string", "null"]
+        exitLightRate:
+          type: ["string", "null"]
+        notes:
+          type: string
+
+    CustomerUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        contact:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        address:
+          type: string
+        contractStatus:
+          type: string
+        contractExpiry:
+          type: ["string", "null"]
+        extinguisherRate:
+          type: ["string", "null"]
+        suppressionRate:
+          type: ["string", "null"]
+        sprinklerRate:
+          type: ["string", "null"]
+        exitLightRate:
+          type: ["string", "null"]
+        notes:
+          type: string
+
+    Job:
+      type: object
+      required: [id, customerId, customerName, employeeId, techName, serviceType, scheduledDate, scheduledTime, status, priority, revenue, certRequired]
+      properties:
+        id:
+          type: integer
+        customerId:
+          type: integer
+        customerName:
+          type: string
+        employeeId:
+          type: ["integer", "null"]
+        techName:
+          type: string
+        serviceType:
+          type: string
+        description:
+          type: string
+        scheduledDate:
+          type: string
+        scheduledTime:
+          type: string
+        status:
+          type: string
+          enum: [pending, in_progress, completed, return, reschedule, emergency, cancelled, non_compliant, will_return]
+        priority:
+          type: string
+          enum: [low, medium, high, critical]
+        revenue:
+          type: number
+        certRequired:
+          type: string
+        recurring:
+          type: boolean
+        recurringInterval:
+          type: ["string", "null"]
+        notes:
+          type: string
+        completedAt:
+          type: ["string", "null"]
+        invoiceId:
+          type: ["integer", "null"]
+        estimateId:
+          type: ["integer", "null"]
+        nonComplianceReason:
+          type: ["string", "null"]
+        nonComplianceNotifiedAt:
+          type: ["string", "null"]
+
+    JobInput:
+      type: object
+      required: [customerId, serviceType, scheduledDate, scheduledTime, revenue]
+      properties:
+        customerId:
+          type: integer
+        employeeId:
+          type: ["integer", "null"]
+        serviceType:
+          type: string
+        description:
+          type: string
+        scheduledDate:
+          type: string
+        scheduledTime:
+          type: string
+        status:
+          type: string
+        priority:
+          type: string
+        revenue:
+          type: number
+        certRequired:
+          type: string
+          nullable: true
+        recurring:
+          type: boolean
+        recurringInterval:
+          type: ["string", "null"]
+        notes:
+          type: ["string", "null"]
+        estimateId:
+          type: ["integer", "null"]
+
+    JobUpdate:
+      type: object
+      properties:
+        employeeId:
+          type: ["integer", "null"]
+        serviceType:
+          type: string
+        description:
+          type: string
+        scheduledDate:
+          type: string
+        scheduledTime:
+          type: string
+        status:
+          type: string
+        priority:
+          type: string
+        revenue:
+          type: number
+        notes:
+          type: string
+        nonComplianceReason:
+          type: ["string", "null"]
+
+    DispatchRow:
+      type: object
+      required: [employeeId, techName, certType, jobs]
+      properties:
+        employeeId:
+          type: integer
+        techName:
+          type: string
+        certType:
+          type: string
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+
+    Estimate:
+      type: object
+      required: [id, customerId, customerName, techName, status, created, validUntil, lineItems, subtotal, taxPct, total, notes]
+      properties:
+        id:
+          type: integer
+        customerId:
+          type: integer
+        customerName:
+          type: string
+        contact:
+          type: string
+        techName:
+          type: string
+        status:
+          type: string
+          enum: [draft, sent, accepted, declined, converted]
+        created:
+          type: string
+        validUntil:
+          type: string
+        sentDate:
+          type: ["string", "null"]
+        acceptedDate:
+          type: ["string", "null"]
+        lineItems:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineItem"
+        subtotal:
+          type: number
+        taxPct:
+          type: number
+        total:
+          type: number
+        notes:
+          type: string
+        convertedJobId:
+          type: ["integer", "null"]
+
+    EstimateInput:
+      type: object
+      required: [customerId, techName, validUntil, lineItems]
+      properties:
+        customerId:
+          type: integer
+        techName:
+          type: string
+        contact:
+          type: string
+        validUntil:
+          type: string
+        lineItems:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineItemInput"
+        taxPct:
+          type: number
+        notes:
+          type: string
+
+    EstimateUpdate:
+      type: object
+      properties:
+        status:
+          type: string
+        techName:
+          type: string
+        validUntil:
+          type: string
+        lineItems:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineItemInput"
+        taxPct:
+          type: number
+        notes:
+          type: string
+
+    LineItem:
+      type: object
+      required: [id, service, description, qty, unitPrice, total]
+      properties:
+        id:
+          type: integer
+        service:
+          type: string
+        description:
+          type: string
+        qty:
+          type: number
+        unitPrice:
+          type: number
+        total:
+          type: number
+
+    LineItemInput:
+      type: object
+      required: [service, qty, unitPrice]
+      properties:
+        service:
+          type: string
+        description:
+          type: string
+        qty:
+          type: number
+        unitPrice:
+          type: number
+
+    Invoice:
+      type: object
+      required: [id, customerId, customerName, status, issued, due, lineItems, subtotal, total, notes]
+      properties:
+        id:
+          type: integer
+        customerId:
+          type: integer
+        customerName:
+          type: string
+        techId:
+          type: ["integer", "null"]
+        techName:
+          type: ["string", "null"]
+        jobId:
+          type: ["integer", "null"]
+        estimateId:
+          type: ["integer", "null"]
+        status:
+          type: string
+          enum: [draft, sent, paid, overdue]
+        issued:
+          type: string
+        due:
+          type: string
+        paidDate:
+          type: ["string", "null"]
+        paymentMethod:
+          type: ["string", "null"]
+        lineItems:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineItem"
+        subtotal:
+          type: number
+        taxPct:
+          type: number
+        total:
+          type: number
+        notes:
+          type: string
+        reminderSent:
+          type: boolean
+
+    InvoiceInput:
+      type: object
+      required: [customerId, due, lineItems]
+      properties:
+        customerId:
+          type: integer
+        techId:
+          type: ["integer", "null"]
+        jobId:
+          type: ["integer", "null"]
+        estimateId:
+          type: ["integer", "null"]
+        due:
+          type: string
+        lineItems:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineItemInput"
+        taxPct:
+          type: number
+        notes:
+          type: string
+
+    InvoiceUpdate:
+      type: object
+      properties:
+        status:
+          type: string
+        techId:
+          type: ["integer", "null"]
+        due:
+          type: string
+        notes:
+          type: string
+        reminderSent:
+          type: boolean
+
+    PaymentInput:
+      type: object
+      required: [paymentMethod, paidDate]
+      properties:
+        paymentMethod:
+          type: string
+          enum: [check, ach, credit_card, cash, zelle]
+        paidDate:
+          type: string
+        amount:
+          type: number
+
+    ScheduleEntry:
+      type: object
+      required: [id, employeeId, techName, jobId, date, startTime, endTime, serviceType, customerName]
+      properties:
+        id:
+          type: integer
+        employeeId:
+          type: integer
+        techName:
+          type: string
+        jobId:
+          type: integer
+        date:
+          type: string
+        startTime:
+          type: string
+        endTime:
+          type: string
+        serviceType:
+          type: string
+        customerName:
+          type: string
+        status:
+          type: string
+
+    AutoAssignResult:
+      type: object
+      required: [assigned, skipped, message]
+      properties:
+        assigned:
+          type: integer
+        skipped:
+          type: integer
+        message:
+          type: string
+
+    Message:
+      type: object
+      required: [id, threadId, senderId, senderName, senderRole, recipientId, recipientName, body, createdAt, read]
+      properties:
+        id:
+          type: integer
+        threadId:
+          type: integer
+        senderId:
+          type: integer
+        senderName:
+          type: string
+        senderRole:
+          type: string
+        recipientId:
+          type: integer
+        recipientName:
+          type: string
+        body:
+          type: string
+        createdAt:
+          type: string
+        read:
+          type: boolean
+
+    MessageInput:
+      type: object
+      required: [recipientId, body]
+      properties:
+        recipientId:
+          type: integer
+        body:
+          type: string
+        threadId:
+          type: ["integer", "null"]
+
+    Thread:
+      type: object
+      required: [id, participantId, participantName, participantRole, lastMessage, lastMessageAt, unreadCount]
+      properties:
+        id:
+          type: integer
+        participantId:
+          type: integer
+        participantName:
+          type: string
+        participantRole:
+          type: string
+        lastMessage:
+          type: string
+        lastMessageAt:
+          type: string
+        unreadCount:
+          type: integer
+
+    UnreadCount:
+      type: object
+      required: [count]
+      properties:
+        count:
+          type: integer
+
+    TimeoffRequest:
+      type: object
+      required: [id, employeeId, employeeName, type, startDate, endDate, status, reason, createdAt]
+      properties:
+        id:
+          type: integer
+        employeeId:
+          type: integer
+        employeeName:
+          type: string
+        type:
+          type: string
+          enum: [time_off, shop_day]
+        startDate:
+          type: string
+        endDate:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, denied]
+        reason:
+          type: string
+        reviewedBy:
+          type: ["string", "null"]
+        reviewNote:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    TimeoffInput:
+      type: object
+      required: [type, startDate, endDate, reason]
+      properties:
+        type:
+          type: string
+          enum: [time_off, shop_day]
+        startDate:
+          type: string
+        endDate:
+          type: string
+        reason:
+          type: string
+
+    TimeoffReviewInput:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [approved, denied]
+        reviewNote:
+          type: string
+
+    ProfitRow:
+      type: object
+      required: [employeeId, name, certType, salary, burdenRate, shopDaysAllowed, shopDaysUsed, revenue, profit, margin, utilization]
+      properties:
+        employeeId:
+          type: integer
+        name:
+          type: string
+        certType:
+          type: string
+        salary:
+          type: number
+        burdenRate:
+          type: number
+        shopDaysAllowed:
+          type: integer
+        shopDaysUsed:
+          type: integer
+        revenue:
+          type: number
+        profit:
+          type: number
+        margin:
+          type: number
+        utilization:
+          type: number
+
+    ShopDayRow:
+      type: object
+      required: [employeeId, name, certType, shopDaysAllowed, shopDaysUsed, shopDaysRemaining, burdenPerDay]
+      properties:
+        employeeId:
+          type: integer
+        name:
+          type: string
+        certType:
+          type: string
+        shopDaysAllowed:
+          type: integer
+        shopDaysUsed:
+          type: integer
+        shopDaysRemaining:
+          type: integer
+        burdenPerDay:
+          type: number
+
+    RecurringSchedule:
+      type: object
+      required: [id, customerId, customerName, serviceType, intervalType, startDate, nextOccurrence, status, revenue, createdAt]
+      properties:
+        id:
+          type: integer
+        customerId:
+          type: integer
+        customerName:
+          type: string
+        employeeId:
+          type: ["integer", "null"]
+        employeeName:
+          type: ["string", "null"]
+        serviceType:
+          type: string
+        intervalType:
+          type: string
+          enum: [6months, 1year, custom]
+        customDays:
+          type: ["integer", "null"]
+        startDate:
+          type: string
+        nextOccurrence:
+          type: string
+        status:
+          type: string
+          enum: [active, paused]
+        revenue:
+          type: number
+        notes:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    RecurringScheduleInput:
+      type: object
+      required: [customerId, serviceType, intervalType, startDate]
+      properties:
+        customerId:
+          type: integer
+        employeeId:
+          type: ["integer", "null"]
+        serviceType:
+          type: string
+        intervalType:
+          type: string
+          enum: [6months, 1year, custom]
+        customDays:
+          type: ["integer", "null"]
+        startDate:
+          type: string
+        revenue:
+          type: number
+        notes:
+          type: ["string", "null"]
+
+    RecurringScheduleUpdate:
+      type: object
+      properties:
+        employeeId:
+          type: ["integer", "null"]
+        serviceType:
+          type: string
+        intervalType:
+          type: string
+        customDays:
+          type: ["integer", "null"]
+        nextOccurrence:
+          type: string
+        revenue:
+          type: number
+        notes:
+          type: ["string", "null"]
+
+    Appointment:
+      type: object
+      required: [id, title, date, startTime, type, createdAt]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: ["string", "null"]
+        date:
+          type: string
+        startTime:
+          type: string
+        endTime:
+          type: ["string", "null"]
+        type:
+          type: string
+          enum: [meeting, site-visit, call, internal, other]
+        participants:
+          type: ["string", "null"]
+        location:
+          type: ["string", "null"]
+        notes:
+          type: ["string", "null"]
+        createdBy:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+
+    CreateAppointmentBody:
+      type: object
+      required: [title, date, startTime, type]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        date:
+          type: string
+        startTime:
+          type: string
+        endTime:
+          type: string
+        type:
+          type: string
+          enum: [meeting, site-visit, call, internal, other]
+        participants:
+          type: string
+        location:
+          type: string
+        notes:
+          type: string
+        createdBy:
+          type: string
+
+    UpdateAppointmentBody:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        date:
+          type: string
+        startTime:
+          type: string
+        endTime:
+          type: string
+        type:
+          type: string
+        participants:
+          type: string
+        location:
+          type: string
+        notes:
+          type: string
+
+    OpenaiConversation:
+      type: object
+      required: [id, title, createdAt]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateOpenaiConversationBody:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+
+    SendOpenaiMessageBody:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
