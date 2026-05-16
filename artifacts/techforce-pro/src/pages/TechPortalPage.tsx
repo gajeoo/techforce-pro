@@ -45,6 +45,7 @@ import {
   addClockEntry,
   getLastClockEntry,
 } from "@/lib/clockHistory";
+import type { ConvexEmployee, ConvexJob, ConvexOpenJob, ConvexTimeOff, TechJob } from "@/lib/convex-types";
 
 // ─── Status types & persistence ─────────────────────────────────────────
 
@@ -124,29 +125,19 @@ function getStatusStripColor(status: TechStatus) {
 
 // ─── Synthesize open-job record ──────────────────────────────────
 
-function openJobToRecord(oj: any, empId: string): Record<string, unknown> & { _id: string; _isOpenJob: true } {
+function openJobToRecord(oj: ConvexOpenJob, empId: string): TechJob & { _isOpenJob: true } {
   return {
-    _id: `open-${oj._id ?? oj.id}`,
+    _id: `open-${String(oj._id)}`,
     _isOpenJob: true as const,
-    customerId: "",
     employeeId: empId,
     serviceType: oj.certRequired ?? "inspection",
     status: "pending",
     priority: oj.priority,
     scheduledDate: null,
     scheduledTime: null,
-    revenue: 0,
-    quantity: 1,
     notes: oj.notes,
-    requiresFollowUp: false,
-    followUpConfirmed: false,
-    certificationRequired: oj.certRequired,
-    locationId: null,
-    locationName: null,
-    dueDate: null,
     customerName: oj.clientName,
-    customerAddress: "See job details",
-    employeeName: null,
+    customerAddress: oj.clientAddress ?? "See job details",
   };
 }
 
@@ -155,12 +146,12 @@ function openJobToRecord(oj: any, empId: string): Record<string, unknown> & { _i
 function JobCard({
   job, idx, statuses, navigate, advanceStatus, openJobs,
 }: {
-  job: any;
+  job: TechJob;
   idx: number;
   statuses: Record<string, TechStatus>;
   navigate: (path: string) => void;
-  advanceStatus: (job: any) => void;
-  openJobs: any[];
+  advanceStatus: (job: TechJob) => void;
+  openJobs: ConvexOpenJob[];
 }) {
   const isOpenJob = job._isOpenJob === true;
   const status    = statuses[job._id] ?? jobStatusToTechStatus(job.status);
@@ -199,7 +190,7 @@ function JobCard({
               <span className="truncate">{job.customerAddress}</span>
             </div>
             {isOpenJob && (() => {
-              const oj = openJobs.find((o: any) => `open-${o._id ?? o.id}` === job._id);
+              const oj = openJobs.find((o: ConvexOpenJob) => `open-${String(o._id)}` === job._id);
               const coNames: string[] = oj?.coTechnicianNames ?? [];
               return coNames.length > 0 ? (
                 <div className="flex items-center gap-1.5 mt-1 text-xs text-primary">
@@ -244,50 +235,50 @@ export function TechPortalPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const employees = (useQuery(api.employees.list)  ?? []) as any[];
-  const jobs      = (useQuery(api.jobs.list, {})   ?? []) as any[];
-  const openJobs  = (useQuery(api.openJobs.list)   ?? []) as any[];
-  const timeoffs  = (useQuery(api.timeoff.list)    ?? []) as any[];
+  const employees = (useQuery(api.employees.list)  ?? []) as ConvexEmployee[];
+  const jobs      = (useQuery(api.jobs.list, {})   ?? []) as ConvexJob[];
+  const openJobs  = (useQuery(api.openJobs.list)   ?? []) as ConvexOpenJob[];
+  const timeoffs  = (useQuery(api.timeoff.list)    ?? []) as ConvexTimeOff[];
   const today     = new Date().toISOString().slice(0, 10);
-  const todayOff  = timeoffs.filter((t: any) => t.status === "approved" && t.startDate <= today && t.endDate >= today);
+  const todayOff  = timeoffs.filter(t => t.status === "approved" && t.startDate <= today && t.endDate >= today);
 
   // Match by name (user.name entered at login) so the tech portal shows the
   // correct person regardless of how auth IDs are stored.
-  const currentTech = useMemo(() => {
+  const currentTech = useMemo((): ConvexEmployee | null => {
     if (!employees.length) return null;
     const byName = user?.name
-      ? employees.find((e: any) => e.name.toLowerCase() === user.name!.toLowerCase())
+      ? employees.find(e => e.name.toLowerCase() === user.name!.toLowerCase())
       : null;
     if (byName) return byName;
     // Fallback: first employee whose role is a tech role
     const techRoles = ["suppression_lead", "extinguisher_tech", "sprinkler_tech", "helper"];
-    return employees.find((e: any) => techRoles.includes(e.role)) ?? employees[0];
+    return employees.find(e => techRoles.includes(e.role)) ?? employees[0];
   }, [employees, user?.name]);
 
   // All regular jobs assigned to this tech — past, present, and future.
-  const regularJobs: any[] = useMemo(() => {
+  const regularJobs = useMemo((): TechJob[] => {
     if (!currentTech) return [];
-    return jobs.filter((j: any) => String(j.employeeId) === String(currentTech._id));
+    return jobs.filter(j => String(j.employeeId) === String(currentTech._id));
   }, [jobs, currentTech]);
 
   // Open jobs assigned to this tech via the AI scheduler.
-  const assignedOpenJobs: any[] = useMemo(() => {
+  const assignedOpenJobs = useMemo((): TechJob[] => {
     if (!currentTech) return [];
     return openJobs
-      .filter((oj: any) => String(oj.assignedEmployeeId) === String(currentTech._id))
-      .map((oj: any) => openJobToRecord(oj, String(currentTech._id)));
+      .filter(oj => String(oj.assignedEmployeeId) === String(currentTech._id))
+      .map(oj => openJobToRecord(oj, String(currentTech._id)));
   }, [openJobs, currentTech]);
 
-  const myJobs: any[] = useMemo(
-    () => [...regularJobs, ...assignedOpenJobs],
+  const myJobs = useMemo(
+    (): TechJob[] => [...regularJobs, ...assignedOpenJobs],
     [regularJobs, assignedOpenJobs],
   );
 
   // Split into past / today / upcoming for the timeline view.
-  const pastJobs     = useMemo(() => myJobs.filter((j: any) => j.scheduledDate && j.scheduledDate < today), [myJobs, today]);
-  const todayJobs    = useMemo(() => myJobs.filter((j: any) => j.scheduledDate === today || (!j.scheduledDate && !j._isOpenJob)), [myJobs, today]);
-  const upcomingJobs = useMemo(() => myJobs.filter((j: any) => j.scheduledDate && j.scheduledDate > today), [myJobs, today]);
-  const openJobCards = useMemo(() => myJobs.filter((j: any) => j._isOpenJob), [myJobs]);
+  const pastJobs     = useMemo(() => myJobs.filter(j => j.scheduledDate && j.scheduledDate < today), [myJobs, today]);
+  const todayJobs    = useMemo(() => myJobs.filter(j => j.scheduledDate === today || (!j.scheduledDate && !j._isOpenJob)), [myJobs, today]);
+  const upcomingJobs = useMemo(() => myJobs.filter(j => j.scheduledDate && j.scheduledDate > today), [myJobs, today]);
+  const openJobCards = useMemo(() => myJobs.filter(j => j._isOpenJob), [myJobs]);
 
   // Status state backed by localStorage (keys are job._id strings)
   const [statuses, setStatuses] = useState<Record<string, TechStatus>>(loadStatuses);
@@ -307,7 +298,7 @@ export function TechPortalPage() {
     }
     return "—";
   });
-  const [completingJob, setCompletingJob] = useState<any | null>(null);
+  const [completingJob, setCompletingJob] = useState<TechJob | null>(null);
   const [completeOpen, setCompleteOpen] = useState(false);
 
   // Completion form state
@@ -322,7 +313,7 @@ export function TechPortalPage() {
     saveStatuses(updated);
   }
 
-  function advanceStatus(job: any) {
+  function advanceStatus(job: TechJob) {
     const current = statuses[job._id] ?? jobStatusToTechStatus(job.status);
     const idx = STATUS_ORDER.indexOf(current);
     if (idx >= STATUS_ORDER.length - 1) return;
