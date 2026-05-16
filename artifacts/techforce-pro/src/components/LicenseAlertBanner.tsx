@@ -1,45 +1,37 @@
-import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
-import { getEmployees, type ApiEmployee } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import type { Doc } from "@/convex/_generated/dataModel";
 import {
   daysUntilExpiry,
   getExpiringLicenses,
   getExpiryStatus,
   type License,
 } from "@/lib/licenses";
+import { useMemo } from "react";
 
 export function LicenseAlertBanner() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [expiring, setExpiring]   = useState<License[]>([]);
-  const [empMap,   setEmpMap]     = useState<Record<string, string>>({});
+  const employees = (useQuery(api.employees.list) ?? []) as Doc<"employees">[];
 
-  useEffect(() => {
+  const empMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    employees.forEach((e: Doc<"employees">) => { map[String(e._id)] = e.name; });
+    return map;
+  }, [employees]);
+
+  const expiring = useMemo((): License[] => {
     const role  = user?.role ?? "manager";
     const empId = user?.id ?? "";
-    // Read licenses from localStorage (no seed call — seeding is done on the Licenses page)
-    if (role === "manager" || role === "supervisor") {
-      setExpiring(getExpiringLicenses());
-    } else if (role === "technician") {
-      setExpiring(getExpiringLicenses(empId));
-    }
+    if (role === "manager" || role === "supervisor") return getExpiringLicenses();
+    if (role === "technician") return getExpiringLicenses(empId);
+    return [];
   }, [user]);
-
-  // Fetch employee names so the banner can display "Tyler: MD Fire Suppression…"
-  useEffect(() => {
-    if (user?.role !== "manager" && user?.role !== "supervisor") return;
-    getEmployees()
-      .then((emps: ApiEmployee[]) => {
-        const map: Record<string, string> = {};
-        emps.forEach(e => { map[String(e.id)] = e.name; });
-        setEmpMap(map);
-      })
-      .catch(() => {});
-  }, [user?.role]);
 
   if (expiring.length === 0) return null;
 
@@ -49,10 +41,6 @@ export function LicenseAlertBanner() {
   });
   const urgent = critical.length > 0;
   const isManagerOrSup = user?.role === "manager" || user?.role === "supervisor";
-
-  function getEmpName(id: string) {
-    return empMap[id] ?? null;
-  }
 
   return (
     <Alert
@@ -70,7 +58,7 @@ export function LicenseAlertBanner() {
         <ul className={`space-y-0.5 ${urgent ? "text-destructive/80" : "text-amber-700 dark:text-amber-300"}`}>
           {expiring.slice(0, 3).map(l => {
             const days   = daysUntilExpiry(l.expiryDate);
-            const name   = isManagerOrSup ? getEmpName(l.empId) : null;
+            const name   = isManagerOrSup ? (empMap[l.empId] ?? null) : null;
             const prefix = name ? `${name}: ` : "";
             return (
               <li key={l.id} className="text-xs">
