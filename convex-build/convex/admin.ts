@@ -1,4 +1,6 @@
 import { mutation, query } from "./_generated/server";
+import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
 
 export const seedDemo = mutation({
   args: {},
@@ -113,5 +115,157 @@ export const exportAll = query({
       ctx.db.query("recurringSchedules").collect(),
     ]);
     return { exportedAt: new Date().toISOString(), version: "2.0-convex", data: { employees, customers, customerLocations, jobs, openJobs, invoices, recurringSchedules } };
+  },
+});
+
+export const importAll = mutation({
+  args: {
+    data: v.object({
+      employees:         v.optional(v.array(v.any())),
+      customers:         v.optional(v.array(v.any())),
+      customerLocations: v.optional(v.array(v.any())),
+      jobs:              v.optional(v.array(v.any())),
+      openJobs:          v.optional(v.array(v.any())),
+      invoices:          v.optional(v.array(v.any())),
+    }),
+    clearFirst: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { data, clearFirst }) => {
+    if (clearFirst) {
+      const tables = ["invoices", "jobs", "openJobs", "customerPricing", "customerLocations", "customers", "employees", "recurringSchedules"] as const;
+      for (const table of tables) {
+        const rows = await (ctx.db.query as any)(table).collect();
+        for (const row of rows) await ctx.db.delete(row._id);
+      }
+    }
+
+    const counts: Record<string, number> = {};
+    const empIdMap = new Map<string, Id<"employees">>();
+    const custIdMap = new Map<string, Id<"customers">>();
+    const jobIdMap = new Map<string, Id<"jobs">>();
+
+    if (data.employees?.length) {
+      for (const e of data.employees) {
+        const oldId = String(e._id ?? e.id ?? "");
+        const newId = await ctx.db.insert("employees", {
+          name: String(e.name ?? "Unknown"),
+          role: String(e.role ?? "extinguisher_tech"),
+          salary: Number(e.salary ?? 50000),
+          billableRate: Number(e.billableRate ?? 800),
+          homeZip: String(e.homeZip ?? "00000"),
+          certifications: Array.isArray(e.certifications) ? e.certifications : [],
+          allowedShopDays: Number(e.allowedShopDays ?? 5),
+          shopDaysUsedYtd: Number(e.shopDaysUsedYtd ?? 0),
+          allowedTrainingDays: Number(e.allowedTrainingDays ?? 3),
+          trainingDaysUsedYtd: Number(e.trainingDaysUsedYtd ?? 0),
+          utilizationPct: Number(e.utilizationPct ?? 0),
+          isActive: e.isActive !== false,
+        });
+        if (oldId) empIdMap.set(oldId, newId);
+      }
+      counts.employees = data.employees.length;
+    }
+
+    if (data.customers?.length) {
+      for (const c of data.customers) {
+        const oldId = String(c._id ?? c.id ?? "");
+        const newId = await ctx.db.insert("customers", {
+          name: String(c.name ?? "Unknown"),
+          facilityType: String(c.facilityType ?? "commercial"),
+          address: String(c.address ?? ""),
+          contactName: String(c.contactName ?? ""),
+          contactPhone: String(c.contactPhone ?? ""),
+          contactEmail: c.contactEmail ? String(c.contactEmail) : undefined,
+          inspectionFrequency: String(c.inspectionFrequency ?? "annual"),
+          isActive: c.isActive !== false,
+        });
+        if (oldId) custIdMap.set(oldId, newId);
+      }
+      counts.customers = data.customers.length;
+    }
+
+    if (data.customerLocations?.length) {
+      for (const l of data.customerLocations) {
+        const oldCustId = String(l.customerId ?? "");
+        const newCustId = custIdMap.get(oldCustId) ?? l.customerId;
+        if (!newCustId) continue;
+        await ctx.db.insert("customerLocations", {
+          customerId: newCustId as Id<"customers">,
+          name: String(l.name ?? "Location"),
+          address: String(l.address ?? ""),
+          contactName: l.contactName ? String(l.contactName) : undefined,
+          contactPhone: l.contactPhone ? String(l.contactPhone) : undefined,
+          isPrimary: l.isPrimary === true,
+        });
+      }
+      counts.customerLocations = data.customerLocations.length;
+    }
+
+    if (data.jobs?.length) {
+      for (const j of data.jobs) {
+        const oldCustId = String(j.customerId ?? "");
+        const newCustId = custIdMap.get(oldCustId) ?? j.customerId;
+        if (!newCustId) continue;
+        const oldEmpId = j.employeeId ? String(j.employeeId) : null;
+        const newEmpId = oldEmpId ? (empIdMap.get(oldEmpId) ?? undefined) : undefined;
+        const oldJobId = String(j._id ?? j.id ?? "");
+        const newJobId = await ctx.db.insert("jobs", {
+          customerId: newCustId as Id<"customers">,
+          employeeId: newEmpId as Id<"employees"> | undefined,
+          serviceType: String(j.serviceType ?? "extinguisher_inspection"),
+          status: String(j.status ?? "pending"),
+          priority: String(j.priority ?? "medium"),
+          scheduledDate: j.scheduledDate ? String(j.scheduledDate) : undefined,
+          dueDate: j.dueDate ? String(j.dueDate) : undefined,
+          revenue: Number(j.revenue ?? 0),
+          quantity: Number(j.quantity ?? 1),
+          notes: j.notes ? String(j.notes) : undefined,
+          certificationRequired: String(j.certificationRequired ?? "any"),
+          requiresFollowUp: j.requiresFollowUp === true,
+          followUpConfirmed: j.followUpConfirmed === true,
+        });
+        if (oldJobId) jobIdMap.set(oldJobId, newJobId);
+      }
+      counts.jobs = data.jobs.length;
+    }
+
+    if (data.openJobs?.length) {
+      for (const oj of data.openJobs) {
+        await ctx.db.insert("openJobs", {
+          title: String(oj.title ?? "Open Job"),
+          clientName: String(oj.clientName ?? ""),
+          clientAddress: oj.clientAddress ? String(oj.clientAddress) : undefined,
+          zipCode: oj.zipCode ? String(oj.zipCode) : undefined,
+          certRequired: String(oj.certRequired ?? "any"),
+          priority: String(oj.priority ?? "medium"),
+          notes: oj.notes ? String(oj.notes) : undefined,
+        });
+      }
+      counts.openJobs = data.openJobs.length;
+    }
+
+    if (data.invoices?.length) {
+      for (const inv of data.invoices) {
+        const oldCustId = String(inv.customerId ?? "");
+        const newCustId = custIdMap.get(oldCustId) ?? inv.customerId;
+        if (!newCustId) continue;
+        const oldTechId = inv.techId ? String(inv.techId) : null;
+        const newTechId = oldTechId ? (empIdMap.get(oldTechId) ?? undefined) : undefined;
+        const oldJobId = inv.jobId ? String(inv.jobId) : null;
+        const newJobId = oldJobId ? (jobIdMap.get(oldJobId) ?? undefined) : undefined;
+        await ctx.db.insert("invoices", {
+          invoiceNumber: String(inv.invoiceNumber ?? `INV-IMP-${Date.now()}`),
+          customerId: newCustId as Id<"customers">,
+          jobId: newJobId as Id<"jobs"> | undefined,
+          techId: newTechId as Id<"employees"> | undefined,
+          lineItems: Array.isArray(inv.lineItems) ? inv.lineItems : [],
+          totalAmount: Number(inv.totalAmount ?? 0),
+          status: String(inv.status ?? "draft"),
+        });
+      }
+      counts.invoices = data.invoices.length;
+    }
+
+    return { success: true, imported: counts };
   },
 });
