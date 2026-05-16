@@ -224,22 +224,35 @@ export const importAll = mutation({
       for (const raw of data.employees) {
         const e = normRow(raw);
         const oldId = String(pick(e, "_id", "id", "employeeId", "empId", "employeeNumber") ?? "");
-        const activeRaw = pick(e, "isActive", "active", "status");
-        const newId = await ctx.db.insert("employees", {
-          name: String(pick(e, "name", "fullName", "employeeName", "tech", "technician", "firstName") ?? "Unknown"),
-          role: normalizeRole(pick(e, "role", "position", "title", "jobTitle", "type")),
-          salary: Number(pick(e, "salary", "annualSalary", "pay", "wage", "compensation") ?? 50000),
-          billableRate: Number(pick(e, "billableRate", "rate", "hourlyRate", "billRate", "billing") ?? 800),
-          homeZip: String(pick(e, "homeZip", "zip", "zipCode", "postalCode", "postal") ?? "00000"),
-          certifications: parseArrayish(pick(e, "certifications", "certs", "certification", "licenses", "license")),
-          allowedShopDays: Number(pick(e, "allowedShopDays", "shopDaysAllowed", "shopAllowance") ?? 5),
-          shopDaysUsedYtd: Number(pick(e, "shopDaysUsedYtd", "shopDaysUsed", "shopUsed") ?? 0),
-          allowedTrainingDays: Number(pick(e, "allowedTrainingDays", "trainingDaysAllowed", "trainingAllowance") ?? 3),
-          trainingDaysUsedYtd: Number(pick(e, "trainingDaysUsedYtd", "trainingDaysUsed", "trainingUsed") ?? 0),
-          utilizationPct: Number(pick(e, "utilizationPct", "utilization", "util", "utilizationPercent") ?? 0),
-          isActive: falsy(activeRaw) ? false : true,
-        });
-        if (oldId) empIdMap.set(oldId, newId);
+        const empName = String(pick(e, "name", "fullName", "employeeName", "tech", "technician", "firstName") ?? "Unknown");
+        const nameKey = `name:${empName.trim().toLowerCase()}`;
+        // Skip insert if an employee with the same name already exists — just map old ID to existing
+        const existingById = oldId ? empIdMap.get(oldId) : undefined;
+        const existingByName = empIdMap.get(nameKey);
+        if (existingById) {
+          // Already mapped (pre-loaded existing employee with that Convex _id) — nothing to do
+        } else if (existingByName) {
+          // Same name exists — reuse existing record, don't create duplicate
+          if (oldId) empIdMap.set(oldId, existingByName);
+        } else {
+          const activeRaw = pick(e, "isActive", "active", "status");
+          const newId = await ctx.db.insert("employees", {
+            name: empName,
+            role: normalizeRole(pick(e, "role", "position", "title", "jobTitle", "type")),
+            salary: Number(pick(e, "salary", "annualSalary", "pay", "wage", "compensation") ?? 50000),
+            billableRate: Number(pick(e, "billableRate", "rate", "hourlyRate", "billRate", "billing") ?? 800),
+            homeZip: String(pick(e, "homeZip", "zip", "zipCode", "postalCode", "postal") ?? "00000"),
+            certifications: parseArrayish(pick(e, "certifications", "certs", "certification", "licenses", "license")),
+            allowedShopDays: Number(pick(e, "allowedShopDays", "shopDaysAllowed", "shopAllowance") ?? 5),
+            shopDaysUsedYtd: Number(pick(e, "shopDaysUsedYtd", "shopDaysUsed", "shopUsed") ?? 0),
+            allowedTrainingDays: Number(pick(e, "allowedTrainingDays", "trainingDaysAllowed", "trainingAllowance") ?? 3),
+            trainingDaysUsedYtd: Number(pick(e, "trainingDaysUsedYtd", "trainingDaysUsed", "trainingUsed") ?? 0),
+            utilizationPct: Number(pick(e, "utilizationPct", "utilization", "util", "utilizationPercent") ?? 0),
+            isActive: falsy(activeRaw) ? false : true,
+          });
+          if (oldId) empIdMap.set(oldId, newId);
+          empIdMap.set(nameKey, newId);
+        }
       }
       counts.employees = data.employees.length;
     }
