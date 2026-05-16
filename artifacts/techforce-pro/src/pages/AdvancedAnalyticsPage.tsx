@@ -1,4 +1,6 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import {
   TrendingUp, TrendingDown, Users, Briefcase, DollarSign, Target,
   BarChart3, Zap, AlertCircle, Eye, EyeOff, Download, Loader2,
@@ -14,7 +16,6 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   ScatterChart, Scatter,
 } from "recharts";
-import { getDashboardSummary, getEmployees, getJobs, getInvoices, getCustomers } from "@/lib/api";
 import {
   calculateJobMetrics, calculateEmployeePerformance, calculateCustomerMetrics,
   calculateRevenueAnalytics, generatePerformanceInsights, formatMetric,
@@ -25,8 +26,7 @@ import { exportToCSV, exportToJSON, generateReport } from "@/lib/exportImport";
 // ─── Page Component ───────────────────────────────────────────────────────────
 
 export default function AdvancedAnalyticsPage() {
-  const [loading, setLoading] = useState(true);
-  const [activeMetrics, setActiveMetrics] = useState<Record<string, boolean>>({
+    const [activeMetrics, setActiveMetrics] = useState<Record<string, boolean>>({
     revenue: true,
     jobs: true,
     employees: true,
@@ -34,38 +34,11 @@ export default function AdvancedAnalyticsPage() {
   });
   const [timeRange, setTimeRange] = useState<"week" | "month" | "quarter">("month");
 
-  const [summary, setSummary] = useState<any>(null);
-  const [employees, setEmployees] = useState<any[]>([]);
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [invoices, setInvoices] = useState<any[]>([]);
-  const [customers, setCustomers] = useState<any[]>([]);
-
-  useEffect(() => {
-    loadAnalyticsData();
-  }, []);
-
-  async function loadAnalyticsData() {
-    try {
-      setLoading(true);
-      const [sumData, empData, jobData, invData, custData] = await Promise.all([
-        getDashboardSummary(),
-        getEmployees(),
-        getJobs(),
-        getInvoices(),
-        getCustomers(),
-      ]);
-
-      setSummary(sumData);
-      setEmployees(empData);
-      setJobs(jobData);
-      setInvoices(invData);
-      setCustomers(custData);
-    } catch (err) {
-      console.error("Failed to load analytics:", err);
-    } finally {
-      setLoading(false);
-    }
-  }
+  const summary = useQuery(api.dashboard.summary);
+  const employees = (useQuery(api.employees.list) ?? []) as any[];
+  const jobs = (useQuery(api.jobs.list) ?? []) as any[];
+  const invoices = (useQuery(api.invoices.list) ?? []) as any[];
+  const customers = (useQuery(api.customers.list) ?? []) as any[];
 
   // Calculated metrics
   const jobMetrics = useMemo(() => jobs ? calculateJobMetrics(jobs) : null, [jobs]);
@@ -107,7 +80,7 @@ export default function AdvancedAnalyticsPage() {
     }
   };
 
-  if (loading) {
+  if (!employees.length && !jobs.length) {
     return (
       <div className="flex items-center justify-center h-96">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />
