@@ -247,6 +247,75 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   }
 }
 
+// ─── Stateless chat (used by frontend on both Replit and Vercel) ─────────────
+
+router.post("/chat", async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  try {
+    const { messages } = req.body as { messages: Array<{ role: string; content: string }> };
+    if (!Array.isArray(messages)) {
+      res.write(`data: ${JSON.stringify({ error: "Invalid request" })}\n\n`);
+      res.end();
+      return;
+    }
+
+    const chatMessages: AIChatMessage[] = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+    ];
+
+    let loopCount = 0;
+    let fullText = "";
+
+    while (loopCount < 5) {
+      loopCount++;
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o",
+        max_tokens: 2048,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        messages: chatMessages as any,
+        tools: TOOLS,
+        stream: false,
+      });
+
+      const choice = completion.choices[0];
+      if (!choice) break;
+      const msg = choice.message;
+
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        chatMessages.push({ role: "assistant", content: msg.content ?? null, tool_calls: msg.tool_calls as ToolCall[] });
+        for (const tc of msg.tool_calls) {
+          const fn = (tc as { id: string; function: { name: string; arguments: string } }).function;
+          let toolArgs: Record<string, unknown> = {};
+          try { toolArgs = JSON.parse(fn.arguments); } catch { /* ignore */ }
+          const toolResult = await executeTool(fn.name, toolArgs);
+          chatMessages.push({ role: "tool", content: toolResult, tool_call_id: tc.id });
+        }
+        continue;
+      }
+
+      fullText = msg.content ?? "";
+      break;
+    }
+
+    const words = fullText.split(" ");
+    for (let i = 0; i < words.length; i++) {
+      const chunk = (i === 0 ? "" : " ") + words[i];
+      res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+      await new Promise(r => setTimeout(r, 12));
+    }
+    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+    res.end();
+  } catch (err) {
+    req.log.error(err, "OpenAI /chat error");
+    res.write(`data: ${JSON.stringify({ error: "AI assistant error. Please try again." })}\n\n`);
+    res.end();
+  }
+});
+
 const CreateConvBody = z.object({ title: z.string().min(1) });
 const SendMsgBody = z.object({ content: z.string().min(1) });
 
