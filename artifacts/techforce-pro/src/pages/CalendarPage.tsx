@@ -11,6 +11,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
+import type { ConvexCustomer, ConvexEmployee, ConvexJob } from "@/lib/convex-types";
 
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -77,10 +79,10 @@ function AddJobDialog({
 }: {
   open: boolean;
   date: string;
-  customers: any[];
-  employees: any[];
+  customers: ConvexCustomer[];
+  employees: ConvexEmployee[];
   onClose: () => void;
-  onSaved: (job: any) => void;
+  onSaved: (job: ConvexJob) => void;
 }) {
   const createJobFn = useMutation(api.jobs.create);
   const [customerId,   setCustomerId]   = useState("");
@@ -104,8 +106,8 @@ function AddJobDialog({
     setSaving(true);
     try {
       const job = await createJobFn({
-        customerId:             Number(customerId),
-        employeeId:             employeeId ? Number(employeeId) : null,
+        customerId:             customerId as Id<"customers">,
+        employeeId:             employeeId ? (employeeId as Id<"employees">) : undefined,
         serviceType,
         scheduledDate:          date,
         scheduledTime:          time,
@@ -149,7 +151,7 @@ function AddJobDialog({
               </SelectTrigger>
               <SelectContent>
                 {customers.map(c => (
-                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                  <SelectItem key={c._id} value={c._id}>{c.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -179,7 +181,7 @@ function AddJobDialog({
                 <SelectContent>
                   <SelectItem value="__none__">Unassigned</SelectItem>
                   {employees.map(e => (
-                    <SelectItem key={e.id} value={String(e.id)}>{e.name}</SelectItem>
+                    <SelectItem key={e._id} value={e._id}>{e.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -267,9 +269,9 @@ export function CalendarPage() {
   const [addJobDate,  setAddJobDate]  = useState("");
   const [addJobOpen,  setAddJobOpen]  = useState(false);
 
-  const jobs      = (useQuery(api.jobs.list)       ?? []) as any[];
-  const customers = (useQuery(api.customers.list) ?? []) as any[];
-  const employees = (useQuery(api.employees.list) ?? []) as any[];
+  const jobs      = (useQuery(api.jobs.list, {})   ?? []) as ConvexJob[];
+  const customers = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
+  const employees = (useQuery(api.employees.list) ?? []) as ConvexEmployee[];
   const [loading,   setLoading]   = useState(true);
 
 
@@ -431,11 +433,11 @@ export function CalendarPage() {
                     </div>
                     <div className="space-y-0.5">
                       {dayJobs.slice(0, 3).map(job => {
-                        const assignedEmp = employees.find(e => e.id === job.employeeId);
+                        const assignedEmp = employees.find(e => e._id === job.employeeId);
                         return (
                         <div
-                          key={job.id}
-                          onClick={e => { e.stopPropagation(); navigate(`/jobs/${job.id}`); }}
+                          key={job._id}
+                          onClick={e => { e.stopPropagation(); navigate(`/jobs/${job._id}`); }}
                           className={`text-[10px] rounded px-1.5 py-0.5 cursor-pointer font-medium leading-tight border
                             ${STATUS_COLORS[job.status] ?? STATUS_COLORS.pending}
                           `}
@@ -492,11 +494,11 @@ export function CalendarPage() {
                   </div>
                 ) : (
                   selectedJobs.map(job => {
-                    const emp = employees.find(e => e.id === job.employeeId);
+                    const emp = employees.find(e => e._id === job.employeeId);
                     return (
                       <div
-                        key={job.id}
-                        onClick={() => navigate(`/jobs/${job.id}`)}
+                        key={job._id}
+                        onClick={() => navigate(`/jobs/${job._id}`)}
                         className="rounded-lg border border-border bg-background p-3 cursor-pointer hover:bg-muted/30 transition-colors space-y-1.5"
                       >
                         <div className="flex items-start justify-between gap-1">
@@ -560,15 +562,15 @@ export function CalendarPage() {
           ) : (
             <div className="divide-y divide-border/50">
               {monthJobs.map(job => {
-                const emp  = employees.find(e => e.id === job.employeeId);
-                const cust = customers.find(c => c.id === job.customerId);
+                const emp  = employees.find(e => e._id === job.employeeId);
+                const cust = customers.find(c => c._id === job.customerId);
                 const dateObj = job.scheduledDate
                   ? new Date(job.scheduledDate + "T12:00:00")
                   : null;
                 return (
                   <div
-                    key={job.id}
-                    onClick={() => navigate(`/jobs/${job.id}`)}
+                    key={job._id}
+                    onClick={() => navigate(`/jobs/${job._id}`)}
                     className="px-4 py-3 flex items-center gap-4 hover:bg-muted/30 cursor-pointer transition-colors"
                   >
                     {/* Date badge */}
