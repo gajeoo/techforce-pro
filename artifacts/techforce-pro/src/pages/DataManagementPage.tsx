@@ -1426,6 +1426,7 @@ function ImportTab() {
   const [importing,      setImporting]      = useState(false);
   const [error,          setError]          = useState<string | null>(null);
   const [mode,           setMode]           = useState<"upload" | "preview">("upload");
+  const doImport = useMutation(anyApi.admin.importAll);
 
   function resetFile() {
     setParsed(null); setSfResult(null); setCsvResult(null);
@@ -1478,8 +1479,6 @@ function ImportTab() {
     };
     reader.readAsText(file);
   }
-
-  const doImport = useMutation(anyApi.admin.importAll);
 
   async function handleImport(data: ParsedData, clearFirst: boolean) {
     setImporting(true);
