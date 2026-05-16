@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ConvexInvoice, ConvexCustomer } from "@/lib/convex-types";
 import {
   AlertTriangle, ArrowLeft, CheckCircle2, Clock, Download,
   Eye, FileCheck, FileText, Image, ReceiptText, Send, Sparkles,
@@ -10,7 +11,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { getInvoices, type ApiInvoice } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import {
   loadCustomerDocuments,
   markDocumentViewed,
@@ -62,7 +64,7 @@ function StatusBadge({ status }: { status: string }) {
 
 // ─── Invoice Detail Dialog ─────────────────────────────────────────────────────
 
-function InvoiceDetailDialog({ inv, open, onClose }: { inv: ApiInvoice | null; open: boolean; onClose: () => void }) {
+function InvoiceDetailDialog({ inv, open, onClose }: { inv: any | null; open: boolean; onClose: () => void }) {
   if (!inv) return null;
   return (
     <Dialog open={open} onOpenChange={o => !o && onClose()}>
@@ -117,7 +119,7 @@ function InvoiceDetailDialog({ inv, open, onClose }: { inv: ApiInvoice | null; o
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/50">
-                  {inv.lineItems.map((l, i) => (
+                  {inv.lineItems.map((l: any, i: number) => (
                     <tr key={i} className="hover:bg-muted/20">
                       <td className="px-3 py-2.5 font-medium">{l.service}</td>
                       <td className="px-3 py-2.5 text-center text-xs">{l.quantity}</td>
@@ -257,31 +259,29 @@ function DocumentsPanel({ docs, onView }: { docs: CustomerDocument[]; onView: (d
 export function CustomerInvoicesPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [invoices, setInvoices] = useState<ApiInvoice[]>([]);
+  const allInvoices = (useQuery(api.invoices.list) ?? []) as ConvexInvoice[];
+  const allCustomers = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
+  // Sort by creation time for deterministic ordering, then index by numeric auth ID
+  const custId = parseInt((user?.id ?? "").replace(/\D/g, "")) || 1;
+  const sortedCustomers = [...allCustomers].sort((a, b) => a._creationTime - b._creationTime);
+  const myCust: ConvexCustomer | undefined = sortedCustomers[custId - 1];
+  // Never fall back to showing all invoices — show nothing while loading or if lookup fails
+  const invoices = myCust ? allInvoices.filter(i => i.customerId === myCust._id) : [];
   const [docs, setDocs] = useState<CustomerDocument[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"all" | "open" | "paid">("all");
-  const [selectedInv, setSelectedInv] = useState<ApiInvoice | null>(null);
+    const [tab, setTab] = useState<"all" | "open" | "paid">("all");
+  const [selectedInv, setSelectedInv] = useState<ConvexInvoice | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<CustomerDocument | null>(null);
   const [docViewOpen, setDocViewOpen] = useState(false);
 
-  const customerId = Number(user?.id ?? 0);
+  const customerId = myCust?._id ?? null;
 
-  useEffect(() => {
-    getInvoices({ customerId: String(customerId) })
-      .then(all => setInvoices(all.filter(i => i.status !== "draft")))
-      .catch(() => setInvoices([]))
-      .finally(() => setLoading(false));
 
-    setDocs(loadCustomerDocuments(customerId));
-  }, [customerId]);
-
-  function openInvoice(inv: ApiInvoice) {
+  function openInvoice(inv: ConvexInvoice) {
     setSelectedInv(inv);
     setDetailOpen(true);
     // Mark the corresponding document as viewed
-    const doc = docs.find(d => d.invoiceId === inv.id);
+    const doc = docs.find(d => d.invoiceId === inv._id);
     if (doc && !doc.viewed) {
       markDocumentViewed(doc.id);
       setDocs(prev => prev.map(d => d.id === doc.id ? { ...d, viewed: true } : d));
@@ -303,8 +303,8 @@ export function CustomerInvoicesPage() {
     return true;
   });
 
-  const totalDue = invoices.filter(i => i.status === "sent" || i.status === "overdue").reduce((s, i) => s + i.totalAmount, 0);
-  const totalPaid = invoices.filter(i => i.status === "paid").reduce((s, i) => s + i.totalAmount, 0);
+  const totalDue = invoices.filter(i => i.status === "sent" || i.status === "overdue").reduce((s: number, i: any) => s + i.totalAmount, 0);
+  const totalPaid = invoices.filter(i => i.status === "paid").reduce((s: number, i: any) => s + i.totalAmount, 0);
   const overdueCount = invoices.filter(i => i.status === "overdue").length;
   const unviewedDocs = docs.filter(d => !d.viewed).length;
 
@@ -391,9 +391,7 @@ export function CustomerInvoicesPage() {
           <CardDescription>Click any invoice to view the full breakdown and download it</CardDescription>
         </CardHeader>
         <CardContent>
-          {loading ? (
-            <div className="py-12 text-center text-sm text-muted-foreground">Loading invoices…</div>
-          ) : displayed.length === 0 ? (
+          {displayed.length === 0 ? (
             <div className="py-12 text-center">
               <ReceiptText className="size-10 mx-auto mb-3 text-muted-foreground/40" />
               <p className="font-semibold text-muted-foreground">No invoices yet</p>
@@ -405,7 +403,7 @@ export function CustomerInvoicesPage() {
                 const order = { overdue: 0, sent: 1, paid: 2, draft: 3 };
                 return (order[a.status as keyof typeof order] ?? 9) - (order[b.status as keyof typeof order] ?? 9);
               }).map(inv => {
-                const isUnread = docs.some(d => d.invoiceId === inv.id && !d.viewed);
+                const isUnread = docs.some(d => d.invoiceId === inv._id && !d.viewed);
                 return (
                   <div
                     key={inv.id}
