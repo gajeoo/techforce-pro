@@ -20,9 +20,50 @@ import {
   calculateJobMetrics, calculateEmployeePerformance, calculateCustomerMetrics,
   calculateRevenueAnalytics, generatePerformanceInsights, formatMetric,
   type AnalyticsMetric, type EmployeePerformance,
+  type AnalyticsJob, type AnalyticsEmployee, type AnalyticsCustomer, type AnalyticsInvoice,
 } from "@/lib/analytics";
 import { exportToCSV, exportToJSON, generateReport } from "@/lib/exportImport";
 import type { ConvexEmployee, ConvexJob, ConvexInvoice, ConvexCustomer } from "@/lib/convex-types";
+
+// ─── Adapters: map Convex document shapes to minimal analytics interfaces ─────
+//
+// The analytics helpers only access a small subset of fields and use a stable
+// `id` key for cross-entity joins.  Convex documents use `_id` (string), so we
+// remap it here — keeping full type safety without casting.
+
+function toAnalyticsJob(j: ConvexJob): AnalyticsJob {
+  return {
+    id: j._id,
+    status: j.status,
+    dueDate: j.dueDate ?? null,
+    serviceType: j.serviceType,
+    employeeId: j.employeeId ?? null,
+    customerId: j.customerId,
+    revenue: j.revenue,
+  };
+}
+
+function toAnalyticsEmployee(e: ConvexEmployee): AnalyticsEmployee {
+  return {
+    id: e._id,
+    name: e.name,
+    utilizationPct: e.utilizationPct !== undefined ? Number(e.utilizationPct) : undefined,
+  };
+}
+
+function toAnalyticsCustomer(c: ConvexCustomer): AnalyticsCustomer {
+  return { id: c._id, name: c.name };
+}
+
+function toAnalyticsInvoice(i: ConvexInvoice): AnalyticsInvoice {
+  return {
+    jobId: i.jobId ?? null,
+    customerId: i.customerId,
+    techId: i.techId ?? null,
+    totalAmount: i.totalAmount,
+    generatedAt: i.generatedAt ?? null,
+  };
+}
 
 // ─── Page Component ───────────────────────────────────────────────────────────
 
@@ -41,23 +82,31 @@ export default function AdvancedAnalyticsPage() {
   const invoices  = (useQuery(api.invoices.list, {}) ?? []) as ConvexInvoice[];
   const customers = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
 
-  // The analytics helpers were written for the old REST-API shape; cast at the
-  // call boundary so variables remain properly typed everywhere else.
-  /* eslint-disable @typescript-eslint/no-explicit-any */
-  const jobMetrics = useMemo(() => jobs.length ? calculateJobMetrics(jobs as any[]) : null, [jobs]);
+  // Convert Convex docs to the minimal analytics-compatible shapes.
+  // Adapters remap _id → id so cross-entity joins inside the helpers work correctly.
+  const analyticsJobs      = useMemo(() => jobs.map(toAnalyticsJob),      [jobs]);
+  const analyticsEmployees = useMemo(() => employees.map(toAnalyticsEmployee), [employees]);
+  const analyticsCustomers = useMemo(() => customers.map(toAnalyticsCustomer), [customers]);
+  const analyticsInvoices  = useMemo(() => invoices.map(toAnalyticsInvoice),  [invoices]);
+
+  const jobMetrics = useMemo(
+    () => analyticsJobs.length ? calculateJobMetrics(analyticsJobs) : null,
+    [analyticsJobs],
+  );
   const employeePerformance = useMemo(
-    () => employees.map(e => calculateEmployeePerformance(e as any, jobs as any[], invoices as any[])),
-    [employees, jobs, invoices]
+    () => analyticsEmployees.map(e => calculateEmployeePerformance(e, analyticsJobs, analyticsInvoices)),
+    [analyticsEmployees, analyticsJobs, analyticsInvoices],
   );
   const customerMetrics = useMemo(
-    () => customers.map(c => calculateCustomerMetrics(c as any, jobs as any[], invoices as any[])),
-    [customers, jobs, invoices]
+    () => analyticsCustomers.map(c => calculateCustomerMetrics(c, analyticsJobs, analyticsInvoices)),
+    [analyticsCustomers, analyticsJobs, analyticsInvoices],
   );
   const revenueMetrics = useMemo(
-    () => invoices.length && jobs.length ? calculateRevenueAnalytics(jobs as any[], invoices as any[]) : null,
-    [jobs, invoices]
+    () => analyticsInvoices.length && analyticsJobs.length
+      ? calculateRevenueAnalytics(analyticsJobs, analyticsInvoices)
+      : null,
+    [analyticsJobs, analyticsInvoices],
   );
-  /* eslint-enable @typescript-eslint/no-explicit-any */
   const insights = useMemo(
     () => jobMetrics && employeePerformance && customerMetrics
       ? generatePerformanceInsights(jobMetrics, employeePerformance, customerMetrics)
