@@ -22,6 +22,7 @@ import {
   type AnalyticsMetric, type EmployeePerformance,
 } from "@/lib/analytics";
 import { exportToCSV, exportToJSON, generateReport } from "@/lib/exportImport";
+import type { ConvexEmployee, ConvexJob, ConvexInvoice, ConvexCustomer } from "@/lib/convex-types";
 
 // ─── Page Component ───────────────────────────────────────────────────────────
 
@@ -35,25 +36,28 @@ export default function AdvancedAnalyticsPage() {
   const [timeRange, setTimeRange] = useState<"week" | "month" | "quarter">("month");
 
   const summary = useQuery(api.dashboard.summary);
-  const employees = (useQuery(api.employees.list) ?? []) as any[];
-  const jobs = (useQuery(api.jobs.list) ?? []) as any[];
-  const invoices = (useQuery(api.invoices.list) ?? []) as any[];
-  const customers = (useQuery(api.customers.list) ?? []) as any[];
+  const employees = (useQuery(api.employees.list) ?? []) as ConvexEmployee[];
+  const jobs      = (useQuery(api.jobs.list, {})   ?? []) as ConvexJob[];
+  const invoices  = (useQuery(api.invoices.list, {}) ?? []) as ConvexInvoice[];
+  const customers = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
 
-  // Calculated metrics
-  const jobMetrics = useMemo(() => jobs ? calculateJobMetrics(jobs) : null, [jobs]);
+  // The analytics helpers were written for the old REST-API shape; cast at the
+  // call boundary so variables remain properly typed everywhere else.
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const jobMetrics = useMemo(() => jobs.length ? calculateJobMetrics(jobs as any[]) : null, [jobs]);
   const employeePerformance = useMemo(
-    () => employees.map(e => calculateEmployeePerformance(e, jobs || [], invoices || [])),
+    () => employees.map(e => calculateEmployeePerformance(e as any, jobs as any[], invoices as any[])),
     [employees, jobs, invoices]
   );
   const customerMetrics = useMemo(
-    () => customers.map(c => calculateCustomerMetrics(c, jobs || [], invoices || [])),
+    () => customers.map(c => calculateCustomerMetrics(c as any, jobs as any[], invoices as any[])),
     [customers, jobs, invoices]
   );
   const revenueMetrics = useMemo(
-    () => invoices && jobs ? calculateRevenueAnalytics(jobs, invoices) : null,
+    () => invoices.length && jobs.length ? calculateRevenueAnalytics(jobs as any[], invoices as any[]) : null,
     [jobs, invoices]
   );
+  /* eslint-enable @typescript-eslint/no-explicit-any */
   const insights = useMemo(
     () => jobMetrics && employeePerformance && customerMetrics
       ? generatePerformanceInsights(jobMetrics, employeePerformance, customerMetrics)
