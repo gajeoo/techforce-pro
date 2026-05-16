@@ -382,9 +382,15 @@ export function DataManagementPage() {
         .filter(k => !["_id", "_creationTime"].includes(k));
       sheets[key] = {
         headers: hdrs,
-        rows: val.map(r =>
-          Object.fromEntries(hdrs.map(h => [h, String((r as Record<string,unknown>)[h] ?? "")]))
-        ),
+        rows: val.map(r => {
+          const rec = r as Record<string, unknown>;
+          const row: Record<string, string> = {};
+          // Displayed columns
+          for (const h of hdrs) row[h] = String(rec[h] ?? "");
+          // Keep _id hidden (not a displayed header) so foreign-key linking survives import
+          if (rec["_id"] !== undefined) row["_id"] = String(rec["_id"]);
+          return row;
+        }),
       };
     }
     setEditedImport(sheets);
@@ -584,8 +590,8 @@ export function DataManagementPage() {
       for (const [key, sheet] of Object.entries(editedImport)) {
         (data as Record<string, unknown[]>)[key] = sheet.rows.map(row => {
           const obj: Record<string, unknown> = {};
-          for (const h of sheet.headers) {
-            const v = row[h] ?? "";
+          // Iterate ALL row keys — includes hidden _id needed for FK linking
+          for (const [h, v] of Object.entries(row)) {
             const n = Number(v);
             obj[h] = v !== "" && !isNaN(n) ? n : v;
           }
