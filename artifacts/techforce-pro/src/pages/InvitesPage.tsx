@@ -13,7 +13,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { generateInviteToken } from "./InvitePage";
 import type { Role } from "@/contexts/AuthContext";
-import { getEmployees, getCustomers, type ApiEmployee, type ApiCustomer } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -76,15 +77,15 @@ function EmptyState({ icon, message }: { icon: React.ReactNode; message: string 
 
 // ─── Staff Card ───────────────────────────────────────────────────────────────
 
-function StaffInviteCard({ emp }: { emp: ApiEmployee }) {
+function StaffInviteCard({ emp }: { emp: any }) {
   const [selectedRole, setSelectedRole] = useState<Role>(
     emp.role?.toLowerCase().includes("lead") || emp.role?.toLowerCase().includes("suppression")
       ? "supervisor"
       : "technician"
   );
 
-  const initials = emp.name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
-  const link = buildLink(selectedRole, String(emp.id), emp.name);
+  const initials = emp.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase();
+  const link = buildLink(selectedRole, String(emp._id), emp.name);
 
   return (
     <Card>
@@ -97,7 +98,7 @@ function StaffInviteCard({ emp }: { emp: ApiEmployee }) {
             </div>
             <div>
               <CardTitle className="text-base">{emp.name}</CardTitle>
-              <CardDescription className="text-xs">{emp.role} · Employee #{emp.id}</CardDescription>
+              <CardDescription className="text-xs">{emp.role} · Employee #{emp._id}</CardDescription>
             </div>
           </div>
 
@@ -159,8 +160,8 @@ function StaffInviteCard({ emp }: { emp: ApiEmployee }) {
 
 // ─── Customer Card ────────────────────────────────────────────────────────────
 
-function CustomerInviteCard({ cust }: { cust: ApiCustomer }) {
-  const link = buildLink("customer", String(cust.id), cust.name);
+function CustomerInviteCard({ cust }: { cust: any }) {
+  const link = buildLink("customer", String(cust._id), cust.name);
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -207,13 +208,9 @@ function CustomerInviteCard({ cust }: { cust: ApiCustomer }) {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function InvitesPage() {
-  const [employees, setEmployees] = useState<ApiEmployee[]>([]);
-  const [customers, setCustomers] = useState<ApiCustomer[]>([]);
+  const employees = (useQuery(api.employees.list) ?? []) as any[];
+  const customers = (useQuery(api.customers.list) ?? []) as any[];
 
-  useEffect(() => {
-    getEmployees().then(setEmployees).catch(() => {});
-    getCustomers().then(setCustomers).catch(() => {});
-  }, []);
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -254,7 +251,7 @@ export function InvitesPage() {
           {employees.length === 0 ? (
             <EmptyState icon={<Users className="size-8" />} message="No employees yet. Add employees to generate invite links." />
           ) : (
-            employees.map(emp => <StaffInviteCard key={emp.id} emp={emp} />)
+            employees.map(emp => <StaffInviteCard key={String(emp._id)} emp={emp} />)
           )}
         </TabsContent>
 
@@ -267,16 +264,16 @@ export function InvitesPage() {
             <EmptyState icon={<Shield className="size-8" />} message="No employees yet. Add employees to generate supervisor invite links." />
           ) : (
             employees.map(emp => {
-              const link = buildLink("supervisor", String(emp.id), emp.name);
-              const initials = emp.name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
+              const link = buildLink("supervisor", String(emp._id), emp.name);
+              const initials = emp.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase();
               return (
-                <Card key={emp.id}>
+                <Card key={String(emp._id)}>
                   <CardHeader className="pb-2">
                     <div className="flex items-center gap-3">
                       <div className="size-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center font-bold text-blue-700 dark:text-blue-300 text-sm shrink-0">{initials}</div>
                       <div>
                         <CardTitle className="text-base">{emp.name}</CardTitle>
-                        <CardDescription className="text-xs">{emp.role} · Employee #{emp.id}</CardDescription>
+                        <CardDescription className="text-xs">{emp.role} · Employee #{emp._id}</CardDescription>
                       </div>
                       <Badge className="ml-auto bg-blue-600 text-white text-[10px]">Supervisor Portal</Badge>
                     </div>
@@ -297,16 +294,16 @@ export function InvitesPage() {
             <EmptyState icon={<Wrench className="size-8" />} message="No employees yet. Add employees to generate technician invite links." />
           ) : (
             employees.map(emp => {
-              const link = buildLink("technician", String(emp.id), emp.name);
-              const initials = emp.name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
+              const link = buildLink("technician", String(emp._id), emp.name);
+              const initials = emp.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase();
               return (
-                <Card key={emp.id}>
+                <Card key={String(emp._id)}>
                   <CardHeader className="pb-2">
                     <div className="flex items-center gap-3">
                       <div className="size-10 rounded-full bg-primary/10 flex items-center justify-center font-bold text-primary text-sm shrink-0">{initials}</div>
                       <div>
                         <CardTitle className="text-base">{emp.name}</CardTitle>
-                        <CardDescription className="text-xs">{emp.role} · Employee #{emp.id}</CardDescription>
+                        <CardDescription className="text-xs">{emp.role} · Employee #{emp._id}</CardDescription>
                       </div>
                       <Badge className="ml-auto bg-emerald-600 text-white text-[10px]">Tech Portal</Badge>
                     </div>
@@ -326,7 +323,7 @@ export function InvitesPage() {
           {customers.length === 0 ? (
             <EmptyState icon={<UserCircle className="size-8" />} message="No customers yet. Add customers to generate portal invite links." />
           ) : (
-            customers.map(cust => <CustomerInviteCard key={cust.id} cust={cust} />)
+            customers.map(cust => <CustomerInviteCard key={String(cust._id)} cust={cust} />)
           )}
         </TabsContent>
       </Tabs>
