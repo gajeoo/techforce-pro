@@ -1,9 +1,9 @@
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useEffect } from "react";
 import {
   Database, Download, Upload, Trash2, Play, CheckCircle2,
   AlertTriangle, FileJson, Users, Building2, Briefcase,
   FileText, RefreshCw, Info, Package, FileCode2, TableProperties,
-  ChevronRight, Search, ArrowLeft, DollarSign, X,
+  ChevronRight, Search, ArrowLeft, DollarSign, X, ServerOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,9 +15,26 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import {
   adminSeedDemo, adminClearAll, adminExport, adminImport,
-  type AdminExportData,
+  type AdminExportData, API_BASE,
 } from "@/lib/api";
 import { toast } from "sonner";
+
+// ─── Backend availability ─────────────────────────────────────────────────────
+
+function is404(e: unknown) {
+  return e instanceof Error && e.message.includes("(404)");
+}
+
+const BACKEND_MSG = "The backend server is not available on this deployment. Run TechForce Pro locally or on Replit to use data management features.";
+
+async function checkBackend(): Promise<boolean> {
+  try {
+    const r = await fetch(`${API_BASE}/health`, { method: "GET" });
+    return r.status !== 404;
+  } catch {
+    return false;
+  }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -465,7 +482,7 @@ function DemoDataTab() {
       ]);
       toast.success("Demo data loaded! All pages are now populated.");
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to seed demo data");
+      toast.error(is404(e) ? BACKEND_MSG : (e instanceof Error ? e.message : "Failed to seed demo data"));
     } finally {
       setSeeding(false);
     }
@@ -479,8 +496,8 @@ function DemoDataTab() {
       clearLocalStorage();
       setLastSeed(null);
       toast.success("All data cleared. The slate is clean — ready for real data.");
-    } catch {
-      toast.error("Failed to clear data");
+    } catch (e) {
+      toast.error(is404(e) ? BACKEND_MSG : "Failed to clear data");
     } finally {
       setClearing(false);
     }
@@ -581,7 +598,7 @@ function ExportTab() {
   async function fetchExport() {
     setExporting(true);
     try { const r = await adminExport(); setData(r); return r; }
-    catch { toast.error("Export failed"); return null; }
+    catch (e) { toast.error(is404(e) ? BACKEND_MSG : "Export failed"); return null; }
     finally { setExporting(false); }
   }
 
@@ -597,7 +614,7 @@ function ExportTab() {
     if (!source) {
       setExporting(true);
       try { source = await adminExport(); setData(source); }
-      catch { toast.error("Export failed"); setExporting(false); return; }
+      catch (e) { toast.error(is404(e) ? BACKEND_MSG : "Export failed"); setExporting(false); return; }
       finally { setExporting(false); }
     }
     const rows = source.data[key] as unknown as Record<string, unknown>[];
@@ -1474,7 +1491,7 @@ function ImportTab() {
       toast.success(`Import complete: ${summary || "no records"}`);
       resetFile();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Import failed");
+      toast.error(is404(e) ? BACKEND_MSG : (e instanceof Error ? e.message : "Import failed"));
     } finally {
       setImporting(false);
     }
@@ -1577,6 +1594,12 @@ function ImportTab() {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function DataManagementPage() {
+  const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    checkBackend().then(setBackendAvailable);
+  }, []);
+
   return (
     <div className="space-y-6 max-w-5xl">
       <div>
@@ -1588,6 +1611,20 @@ export function DataManagementPage() {
           Import from ServiceFusion or CSV, export backups, and manage demo data.
         </p>
       </div>
+
+      {backendAvailable === false && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-800 dark:text-amber-300 flex gap-3">
+          <ServerOff className="size-4 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold mb-1">Backend server not available</p>
+            <p>
+              Data management features (import, export, seed/clear) require the TechForce Pro
+              backend server. This Vercel deployment is a static preview — run the app on{" "}
+              <strong>Replit</strong> or a self-hosted server to use these features.
+            </p>
+          </div>
+        </div>
+      )}
 
       <Tabs defaultValue="import">
         <TabsList className="grid w-full grid-cols-3">
