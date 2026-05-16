@@ -58,20 +58,36 @@ function toCsv(rows: Record<string, unknown>[]): string {
 }
 
 function parseCsv(text: string): Record<string, string>[] {
-  const lines = text.split(/\r?\n/).filter(l => l.trim());
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.replace(/^"|"$/g, "").trim());
-  return lines.slice(1).map(line => {
-    const vals: string[] = [];
-    let cur = "", inQ = false;
-    for (const ch of line) {
-      if (ch === '"') { inQ = !inQ; continue; }
-      if (ch === "," && !inQ) { vals.push(cur); cur = ""; }
-      else cur += ch;
+  // Strip BOM if present
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  // Full RFC 4180-ish parser: supports embedded newlines, "" escapes, CR/LF
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cur = "";
+  let inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { cur += '"'; i++; }
+        else { inQ = false; }
+      } else { cur += ch; }
+    } else {
+      if (ch === '"') { inQ = true; }
+      else if (ch === ",") { row.push(cur); cur = ""; }
+      else if (ch === "\r") { /* skip */ }
+      else if (ch === "\n") { row.push(cur); cur = ""; rows.push(row); row = []; }
+      else { cur += ch; }
     }
-    vals.push(cur);
-    return Object.fromEntries(headers.map((h, i) => [h, vals[i] ?? ""]));
-  });
+  }
+  if (cur !== "" || row.length) { row.push(cur); rows.push(row); }
+  // Drop fully-empty rows
+  const filled = rows.filter(r => r.some(c => c.trim() !== ""));
+  if (filled.length < 2) return [];
+  const headers = filled[0].map(h => h.trim());
+  return filled.slice(1).map(vals =>
+    Object.fromEntries(headers.map((h, i) => [h, (vals[i] ?? "").trim()]))
+  );
 }
 
 // ─── ServiceFusion HTML parser ────────────────────────────────────────────────
@@ -238,7 +254,31 @@ const ENTITY_ALIASES: Record<string, string> = {
 
 function detectEntity(filename: string): string | null {
   const base = filename.toLowerCase().replace(/\.[^.]+$/, "").replace(/[-_\s]/g, "");
-  return ENTITY_ALIASES[base] ?? null;
+  if (ENTITY_ALIASES[base]) return ENTITY_ALIASES[base];
+  // Try partial matches (e.g. "employee_list_2024" → "employees")
+  for (const [alias, entity] of Object.entries(ENTITY_ALIASES)) {
+    if (alias.length >= 4 && base.includes(alias)) return entity;
+  }
+  return null;
+}
+
+// Header-based fallback: infer entity from CSV/sheet column headers.
+// Used when filename detection fails. Returns the best-match entity or null.
+function detectEntityFromHeaders(headers: string[]): string | null {
+  const norm = headers.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ""));
+  const has = (...keys: string[]) => keys.some(k => norm.includes(k));
+  const hasAny = (...keys: string[]) => keys.some(k => norm.some(h => h.includes(k)));
+
+  // Strong signals first
+  if (has("invoicenumber", "invoiceno", "invoiceid") || hasAny("invoice") && has("totalamount", "amountdue", "balance")) return "invoices";
+  if (has("salary", "billablerate", "shopdaysusedytd") || (hasAny("employee", "tech", "technician", "staff") && has("role", "salary", "position"))) return "employees";
+  if (has("certifications", "certs") && has("name")) return "employees";
+  if (has("facilitytype", "inspectionfrequency") || (hasAny("customer", "client", "company") && has("contactphone", "phone", "address"))) return "customers";
+  if (has("servicetype", "scheduleddate", "jobnumber", "workorder", "workordernumber")) return "jobs";
+  if ((has("revenue", "amount", "total") && has("customer", "customername", "client")) ) return "jobs";
+  if (has("licenseplate", "make", "model", "gpstrackerid")) return "vans";
+  if (has("requesteddate", "timeofftype")) return "timeOffRequests";
+  return null;
 }
 
 // ─── Editable import grid types ───────────────────────────────────────────────
@@ -429,13 +469,20 @@ export function DataManagementPage() {
   }
 
   function parseCsvFile(text: string, filename: string) {
-    const entity = detectEntity(filename);
-    if (!entity) {
-      toast.error(`Can't detect entity from filename "${filename}". Rename to e.g. employees.csv, jobs.csv, invoices.csv.`);
-      return;
-    }
     const rows = parseCsv(text);
     if (!rows.length) { toast.error("CSV has no data rows"); return; }
+    const headers = Object.keys(rows[0] ?? {});
+    let entity = detectEntity(filename) ?? detectEntityFromHeaders(headers);
+    if (!entity) {
+      // Last-ditch: default to employees if file looks like a list of people
+      const norm = headers.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ""));
+      if (norm.includes("name")) entity = "employees";
+    }
+    if (!entity) {
+      toast.error(`Can't detect entity from "${filename}" or its columns (${headers.slice(0,5).join(", ")}…). Rename file to employees.csv / customers.csv / jobs.csv / invoices.csv, or include a recognizable column.`);
+      return;
+    }
+    toast.success(`Detected as ${entity} (${rows.length} rows)`);
     const bundle: DataBundle = { [entity]: rows };
     setImportPreview(buildPreview(bundle, makeFingerprint(text), filename));
   }
@@ -445,10 +492,15 @@ export function DataManagementPage() {
       const wb = XLSX.read(buffer, { type: "array" });
       const bundle: DataBundle = {};
       for (const sheetName of wb.SheetNames) {
-        const entity = detectEntity(sheetName) ?? detectEntity(filename);
-        if (!entity) continue;
         const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[sheetName]);
-        if (rows.length) (bundle as Record<string, unknown[]>)[entity] = rows;
+        if (!rows.length) continue;
+        const headers = Object.keys(rows[0] ?? {});
+        const entity =
+          detectEntity(sheetName) ??
+          detectEntity(filename) ??
+          detectEntityFromHeaders(headers);
+        if (!entity) continue;
+        (bundle as Record<string, unknown[]>)[entity] = rows;
       }
       if (!Object.keys(bundle).length) {
         toast.error("No recognisable entity sheets found in the workbook.");
