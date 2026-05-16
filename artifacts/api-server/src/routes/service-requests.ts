@@ -1,56 +1,58 @@
 import { Router } from "express";
-import { db } from "@workspace/db";
-import { serviceRequestsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { m, q, asId } from "../lib/convex-utils";
 
 const router = Router();
 
-// GET /api/service-requests?customerId=&status=
 router.get("/service-requests", async (req, res) => {
-  const { customerId, status } = req.query as Record<string, string | undefined>;
-  let requests = await db.select().from(serviceRequestsTable).orderBy(serviceRequestsTable.createdAt);
-  if (customerId) requests = requests.filter(r => r.customerId === Number(customerId));
-  if (status) requests = requests.filter(r => r.status === status);
-  res.json(requests.reverse());
+  try {
+    const customerId = req.query.customerId ? asId(req.query.customerId) : undefined;
+    const status = req.query.status ? String(req.query.status) : undefined;
+    return res.json(await q("serviceRequests:list", {
+      ...(customerId ? { customerId } : {}),
+      ...(status ? { status } : {}),
+    }));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to list service requests", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
-// POST /api/service-requests
 router.post("/service-requests", async (req, res) => {
-  const body = req.body;
-  const [request] = await db.insert(serviceRequestsTable).values({
-    customerId: Number(body.customerId),
-    customerName: body.customerName ?? "Customer",
-    serviceType: body.serviceType,
-    description: body.description ?? null,
-    location: body.location ?? null,
-    preferredDate: body.preferredDate ?? null,
-    urgency: body.urgency ?? "normal",
-    status: "pending",
-    managerMessage: null,
-    fulfilledJobId: null,
-  }).returning();
-  res.status(201).json(request);
+  try {
+    const body = req.body ?? {};
+    const id = await m("serviceRequests:create", {
+      customerId: asId(body.customerId),
+      serviceType: String(body.serviceType ?? ""),
+      urgency: String(body.urgency ?? "normal"),
+      ...(body.description ? { description: String(body.description) } : {}),
+    });
+    return res.status(201).json({ id });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to create service request", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
-// PUT /api/service-requests/:id
 router.put("/service-requests/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  const body = req.body;
-  const [request] = await db.update(serviceRequestsTable).set({
-    ...(body.status !== undefined && { status: body.status }),
-    ...(body.managerMessage !== undefined && { managerMessage: body.managerMessage }),
-    ...(body.fulfilledJobId !== undefined && { fulfilledJobId: body.fulfilledJobId ? Number(body.fulfilledJobId) : null }),
-    updatedAt: new Date(),
-  }).where(eq(serviceRequestsTable.id, id)).returning();
-  if (!request) return res.status(404).json({ error: "Service request not found" });
-  return res.json(request);
+  try {
+    const body = req.body ?? {};
+    const updated = await m("serviceRequests:update", {
+      id: asId(req.params.id),
+      ...(body.status !== undefined ? { status: String(body.status) } : {}),
+      ...(body.fulfilledJobId !== undefined ? { fulfilledJobId: body.fulfilledJobId ? asId(body.fulfilledJobId) : undefined } : {}),
+    });
+    if (!updated) return res.status(404).json({ error: "Service request not found" });
+    return res.json(updated);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update service request", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
-// DELETE /api/service-requests/:id
 router.delete("/service-requests/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  await db.delete(serviceRequestsTable).where(eq(serviceRequestsTable.id, id));
-  res.json({ success: true });
+  try {
+    await m("serviceRequests:remove", { id: asId(req.params.id) });
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete service request", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 export default router;

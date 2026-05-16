@@ -1,110 +1,98 @@
 import { Router } from "express";
-import { db } from "@workspace/db";
-import { invoicesTable, customersTable, invoiceTemplateTable, employeesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { m, q, asId } from "../lib/convex-utils";
 
 const router = Router();
 
-async function enrichInvoice(invoice: typeof invoicesTable.$inferSelect) {
-  const [customer] = await db.select().from(customersTable).where(eq(customersTable.id, invoice.customerId));
-  let techName: string | null = null;
-  if (invoice.techId) {
-    const [emp] = await db.select().from(employeesTable).where(eq(employeesTable.id, invoice.techId));
-    techName = emp?.name ?? null;
-  }
-  return {
-    ...invoice,
-    totalAmount: Number(invoice.totalAmount),
-    customerName: customer?.name ?? "Unknown",
-    techName,
-  };
-}
-
 router.get("/invoices", async (req, res) => {
-  const customerIdFilter = req.query.customerId ? Number(req.query.customerId) : null;
-  let query = db.select().from(invoicesTable).orderBy(invoicesTable.generatedAt);
-  const invoices = customerIdFilter
-    ? (await query).filter(i => i.customerId === customerIdFilter)
-    : await query;
-  const customers = await db.select().from(customersTable);
-  const employees = await db.select().from(employeesTable);
-  const customerMap = Object.fromEntries(customers.map(c => [c.id, c]));
-  const employeeMap = Object.fromEntries(employees.map(e => [e.id, e]));
-  res.json(invoices.map(i => ({
-    ...i,
-    totalAmount: Number(i.totalAmount),
-    customerName: customerMap[i.customerId]?.name ?? "Unknown",
-    techName: i.techId ? (employeeMap[i.techId]?.name ?? null) : null,
-  })));
+  try {
+    const customerId = req.query.customerId ? asId(req.query.customerId) : undefined;
+    return res.json(await q("invoices:list", customerId ? { customerId } : {}));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to list invoices", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.post("/invoices", async (req, res) => {
-  const body = req.body;
-  const invoiceNumber = `MC-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 9000) + 1000).padStart(4, "0")}`;
-  const totalAmount = (body.lineItems ?? []).reduce((sum: number, item: { total: number }) => sum + item.total, 0);
-  const [invoice] = await db.insert(invoicesTable).values({
-    invoiceNumber,
-    customerId: body.customerId,
-    jobId: body.jobId ?? null,
-    techId: body.techId ?? null,
-    lineItems: body.lineItems ?? [],
-    totalAmount: String(totalAmount),
-    status: "draft",
-  }).returning();
-  res.status(201).json(await enrichInvoice(invoice));
+  try {
+    const body = req.body ?? {};
+    const lineItems = Array.isArray(body.lineItems) ? body.lineItems : [];
+    const totalAmount = lineItems.reduce((sum: number, item: any) => sum + Number(item?.total ?? 0), 0);
+    const id = await m("invoices:create", {
+      customerId: asId(body.customerId),
+      ...(body.jobId ? { jobId: asId(body.jobId) } : {}),
+      ...(body.techId ? { techId: asId(body.techId) } : {}),
+      lineItems: lineItems.map((it: any) => ({
+        service: String(it.service ?? ""),
+        quantity: Number(it.quantity ?? 0),
+        rate: Number(it.rate ?? 0),
+        total: Number(it.total ?? 0),
+      })),
+      totalAmount,
+      status: String(body.status ?? "draft"),
+    });
+    return res.status(201).json(await q("invoices:get", { id: asId(id) }));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to create invoice", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.get("/invoices/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  const [invoice] = await db.select().from(invoicesTable).where(eq(invoicesTable.id, id));
-  if (!invoice) return res.status(404).json({ error: "Invoice not found" });
-  return res.json(await enrichInvoice(invoice));
+  try {
+    const invoice = await q("invoices:get", { id: asId(req.params.id) });
+    if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+    return res.json(invoice);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch invoice", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.put("/invoices/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  const body = req.body;
-  const updates: Record<string, unknown> = {};
-  if (body.status !== undefined) updates.status = body.status;
-  if (body.techId !== undefined) updates.techId = body.techId === "__none__" ? null : (body.techId ? Number(body.techId) : null);
-  if (Object.keys(updates).length === 0) return res.status(400).json({ error: "No fields to update" });
-  const [invoice] = await db.update(invoicesTable).set(updates).where(eq(invoicesTable.id, id)).returning();
-  if (!invoice) return res.status(404).json({ error: "Invoice not found" });
-  return res.json(await enrichInvoice(invoice));
+  try {
+    const body = req.body ?? {};
+    const updated = await m("invoices:update", {
+      id: asId(req.params.id),
+      ...(body.status !== undefined ? { status: String(body.status) } : {}),
+      ...(body.techId !== undefined ? { techId: body.techId ? asId(body.techId) : undefined } : {}),
+      ...(body.lineItems !== undefined
+        ? {
+            lineItems: (Array.isArray(body.lineItems) ? body.lineItems : []).map((it: any) => ({
+              service: String(it.service ?? ""),
+              quantity: Number(it.quantity ?? 0),
+              rate: Number(it.rate ?? 0),
+              total: Number(it.total ?? 0),
+            })),
+          }
+        : {}),
+      ...(body.totalAmount !== undefined ? { totalAmount: Number(body.totalAmount) } : {}),
+    });
+    if (!updated) return res.status(404).json({ error: "Invoice not found" });
+    return res.json(await q("invoices:get", { id: asId(req.params.id) }));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update invoice", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.get("/invoice-template", async (_req, res) => {
-  const [template] = await db.select().from(invoiceTemplateTable);
-  if (!template) {
-    const [created] = await db.insert(invoiceTemplateTable).values({
-      companyName: "Multicorp Fire Protection Services",
-      address: "9693 Gerwig Lane, Columbia, MD 21046",
-      phone: "(410) 876-5000",
-    }).returning();
-    return res.json(created);
+  try {
+    return res.json(await q("invoices:getTemplate"));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch invoice template", detail: err instanceof Error ? err.message : String(err) });
   }
-  return res.json(template);
 });
 
 router.put("/invoice-template", async (req, res) => {
-  const [existing] = await db.select().from(invoiceTemplateTable);
-  if (existing) {
-    const [updated] = await db.update(invoiceTemplateTable).set({
-      companyName: req.body.companyName ?? existing.companyName,
-      address: req.body.address ?? existing.address,
-      phone: req.body.phone ?? existing.phone,
-      logoUrl: req.body.logoUrl ?? existing.logoUrl,
-      updatedAt: new Date(),
-    }).where(eq(invoiceTemplateTable.id, existing.id)).returning();
-    return res.json(updated);
+  try {
+    const body = req.body ?? {};
+    await m("invoices:updateTemplate", {
+      ...(body.companyName !== undefined ? { companyName: String(body.companyName) } : {}),
+      ...(body.address !== undefined ? { address: String(body.address) } : {}),
+      ...(body.phone !== undefined ? { phone: String(body.phone) } : {}),
+      ...(body.logoUrl !== undefined ? { logoUrl: body.logoUrl ? String(body.logoUrl) : undefined } : {}),
+    });
+    return res.json(await q("invoices:getTemplate"));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update invoice template", detail: err instanceof Error ? err.message : String(err) });
   }
-  const [created] = await db.insert(invoiceTemplateTable).values({
-    companyName: req.body.companyName ?? "Multicorp Fire Protection Services",
-    address: req.body.address ?? "9693 Gerwig Lane, Columbia, MD 21046",
-    phone: req.body.phone ?? "(410) 876-5000",
-    logoUrl: req.body.logoUrl ?? null,
-  }).returning();
-  return res.json(created);
 });
 
 export default router;

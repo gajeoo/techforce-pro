@@ -89,3 +89,11 @@ export const review = mutation({
     return await ctx.db.get(id);
   },
 });
+
+export const remove = mutation({
+  args: { id: v.id("timeOffRequests") },
+  handler: async (ctx, { id }) => {
+    await ctx.db.delete(id);
+    return { success: true };
+  },
+});

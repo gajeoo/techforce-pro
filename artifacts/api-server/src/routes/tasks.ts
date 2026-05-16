@@ -1,58 +1,67 @@
 import { Router } from "express";
-import { db } from "@workspace/db";
-import { tasksTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { m, q, asId } from "../lib/convex-utils";
 
 const router = Router();
 
-// GET /api/tasks?status=&assignedTo=
 router.get("/tasks", async (req, res) => {
-  const { status, assignedTo } = req.query as Record<string, string | undefined>;
-  let tasks = await db.select().from(tasksTable).orderBy(tasksTable.createdAt);
-  if (status) tasks = tasks.filter(t => t.status === status);
-  if (assignedTo) tasks = tasks.filter(t => t.assignedTo === assignedTo || t.assignedTo === null);
-  res.json(tasks.reverse());
+  try {
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const assignedTo = req.query.assignedTo ? String(req.query.assignedTo) : undefined;
+    return res.json(await q("tasks:list", {
+      ...(status ? { status } : {}),
+      ...(assignedTo ? { assignedTo } : {}),
+    }));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to list tasks", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
-// POST /api/tasks
 router.post("/tasks", async (req, res) => {
-  const body = req.body;
-  const [task] = await db.insert(tasksTable).values({
-    title: body.title,
-    description: body.description ?? null,
-    createdBy: body.createdBy ?? "Manager",
-    createdByRole: body.createdByRole ?? "manager",
-    assignedTo: body.assignedTo ?? null,
-    priority: body.priority ?? "medium",
-    status: "open",
-    dueDate: body.dueDate ?? null,
-    jobId: body.jobId ? Number(body.jobId) : null,
-  }).returning();
-  res.status(201).json(task);
+  try {
+    const body = req.body ?? {};
+    const id = await m("tasks:create", {
+      title: String(body.title ?? "Task"),
+      ...(body.description ? { description: String(body.description) } : {}),
+      createdBy: String(body.createdBy ?? "Manager"),
+      createdByRole: String(body.createdByRole ?? "manager"),
+      ...(body.assignedTo ? { assignedTo: String(body.assignedTo) } : {}),
+      priority: String(body.priority ?? "medium"),
+      status: String(body.status ?? "open"),
+      ...(body.dueDate ? { dueDate: String(body.dueDate) } : {}),
+      ...(body.jobId ? { jobId: asId(body.jobId) } : {}),
+    });
+    return res.status(201).json({ id });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to create task", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
-// PUT /api/tasks/:id
 router.put("/tasks/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  const body = req.body;
-  const [task] = await db.update(tasksTable).set({
-    ...(body.title !== undefined && { title: body.title }),
-    ...(body.description !== undefined && { description: body.description }),
-    ...(body.assignedTo !== undefined && { assignedTo: body.assignedTo }),
-    ...(body.priority !== undefined && { priority: body.priority }),
-    ...(body.status !== undefined && { status: body.status }),
-    ...(body.dueDate !== undefined && { dueDate: body.dueDate }),
-    updatedAt: new Date(),
-  }).where(eq(tasksTable.id, id)).returning();
-  if (!task) return res.status(404).json({ error: "Task not found" });
-  return res.json(task);
+  try {
+    const body = req.body ?? {};
+    const updated = await m("tasks:update", {
+      id: asId(req.params.id),
+      ...(body.title !== undefined ? { title: String(body.title) } : {}),
+      ...(body.description !== undefined ? { description: body.description ? String(body.description) : undefined } : {}),
+      ...(body.assignedTo !== undefined ? { assignedTo: body.assignedTo ? String(body.assignedTo) : undefined } : {}),
+      ...(body.priority !== undefined ? { priority: String(body.priority) } : {}),
+      ...(body.status !== undefined ? { status: String(body.status) } : {}),
+      ...(body.dueDate !== undefined ? { dueDate: body.dueDate ? String(body.dueDate) : undefined } : {}),
+    });
+    if (!updated) return res.status(404).json({ error: "Task not found" });
+    return res.json(updated);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update task", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
-// DELETE /api/tasks/:id
 router.delete("/tasks/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  await db.delete(tasksTable).where(eq(tasksTable.id, id));
-  res.json({ success: true });
+  try {
+    await m("tasks:remove", { id: asId(req.params.id) });
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete task", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 export default router;

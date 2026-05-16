@@ -1,131 +1,88 @@
 import { Router } from "express";
-import { db } from "@workspace/db";
-import { recurringSchedulesTable, customersTable, employeesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
-import { z } from "zod";
+import { m, q, asId } from "../lib/convex-utils";
 
 const router = Router();
 
-const RecurringScheduleInputSchema = z.object({
-  customerId:     z.number().int(),
-  employeeId:     z.number().int().nullable().optional(),
-  serviceType:    z.string().min(1),
-  intervalType:   z.enum(["6months", "1year", "custom"]),
-  customDays:     z.number().int().positive().nullable().optional(),
-  startDate:      z.string(),
-  revenue:        z.number().nonnegative().optional().default(0),
-  notes:          z.string().nullable().optional(),
-});
-
-const RecurringScheduleUpdateSchema = z.object({
-  employeeId:     z.number().int().nullable().optional(),
-  serviceType:    z.string().optional(),
-  intervalType:   z.enum(["6months", "1year", "custom"]).optional(),
-  customDays:     z.number().int().positive().nullable().optional(),
-  nextOccurrence: z.string().optional(),
-  revenue:        z.number().nonnegative().optional(),
-  notes:          z.string().nullable().optional(),
-});
-
-function computeNextOccurrence(from: string, intervalType: string, customDays?: number | null): string {
-  const d = new Date(from + "T12:00:00Z");
-  if (intervalType === "6months") d.setMonth(d.getMonth() + 6);
-  else if (intervalType === "1year") d.setFullYear(d.getFullYear() + 1);
-  else if (intervalType === "custom" && customDays) d.setDate(d.getDate() + customDays);
-  return d.toISOString().slice(0, 10);
-}
-
-async function enrichSchedule(s: typeof recurringSchedulesTable.$inferSelect) {
-  const [customer] = await db.select().from(customersTable).where(eq(customersTable.id, s.customerId));
-  let employeeName: string | null = null;
-  if (s.employeeId) {
-    const [emp] = await db.select().from(employeesTable).where(eq(employeesTable.id, s.employeeId));
-    employeeName = emp?.name ?? null;
+router.get("/recurring-schedules", async (_req, res) => {
+  try {
+    return res.json(await q("recurringSchedules:list"));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to list recurring schedules", detail: err instanceof Error ? err.message : String(err) });
   }
-  return {
-    ...s,
-    revenue: Number(s.revenue),
-    customerName: customer?.name ?? "Unknown",
-    employeeName,
-    createdAt: s.createdAt.toISOString(),
-  };
-}
-
-router.get("/recurring-schedules", async (req, res) => {
-  const rows = await db.select().from(recurringSchedulesTable).orderBy(recurringSchedulesTable.nextOccurrence);
-  const customers = await db.select().from(customersTable);
-  const employees = await db.select().from(employeesTable);
-  const cMap = Object.fromEntries(customers.map(c => [c.id, c]));
-  const eMap = Object.fromEntries(employees.map(e => [e.id, e]));
-  res.json(rows.map(s => ({
-    ...s,
-    revenue: Number(s.revenue),
-    customerName: cMap[s.customerId]?.name ?? "Unknown",
-    employeeName: s.employeeId ? (eMap[s.employeeId]?.name ?? null) : null,
-    createdAt: s.createdAt.toISOString(),
-  })));
 });
 
 router.post("/recurring-schedules", async (req, res) => {
-  const body = RecurringScheduleInputSchema.parse(req.body);
-  const nextOccurrence = computeNextOccurrence(body.startDate, body.intervalType, body.customDays);
-  const [inserted] = await db.insert(recurringSchedulesTable).values({
-    customerId:     body.customerId,
-    employeeId:     body.employeeId ?? null,
-    serviceType:    body.serviceType,
-    intervalType:   body.intervalType,
-    customDays:     body.customDays ?? null,
-    startDate:      body.startDate,
-    nextOccurrence,
-    status:         "active",
-    revenue:        String(body.revenue ?? 0),
-    notes:          body.notes ?? null,
-  }).returning();
-  const enriched = await enrichSchedule(inserted);
-  res.status(201).json(enriched);
+  try {
+    const body = req.body ?? {};
+    const id = await m("recurringSchedules:create", {
+      customerId: asId(body.customerId),
+      ...(body.employeeId ? { employeeId: asId(body.employeeId) } : {}),
+      serviceType: String(body.serviceType ?? "extinguisher_inspection"),
+      intervalType: String(body.intervalType ?? "1year"),
+      ...(body.customDays !== undefined ? { customDays: Number(body.customDays) } : {}),
+      startDate: String(body.startDate ?? new Date().toISOString().slice(0, 10)),
+      ...(body.revenue !== undefined ? { revenue: Number(body.revenue) } : {}),
+      ...(body.notes ? { notes: String(body.notes) } : {}),
+    });
+    return res.status(201).json({ id });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to create recurring schedule", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.get("/recurring-schedules/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  const [row] = await db.select().from(recurringSchedulesTable).where(eq(recurringSchedulesTable.id, id));
-  if (!row) { res.status(404).json({ error: "Not found" }); return; }
-  res.json(await enrichSchedule(row));
+  try {
+    const all = await q<any[]>("recurringSchedules:list");
+    const row = all.find((r) => String((r as any)._id) === req.params.id);
+    if (!row) return res.status(404).json({ error: "Not found" });
+    return res.json(row);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch recurring schedule", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.put("/recurring-schedules/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  const body = RecurringScheduleUpdateSchema.parse(req.body);
-  const updates: Record<string, unknown> = {};
-  if (body.employeeId !== undefined) updates.employeeId = body.employeeId;
-  if (body.serviceType !== undefined) updates.serviceType = body.serviceType;
-  if (body.intervalType !== undefined) updates.intervalType = body.intervalType;
-  if (body.customDays !== undefined) updates.customDays = body.customDays;
-  if (body.nextOccurrence !== undefined) updates.nextOccurrence = body.nextOccurrence;
-  if (body.revenue !== undefined) updates.revenue = String(body.revenue);
-  if (body.notes !== undefined) updates.notes = body.notes;
-  const [updated] = await db.update(recurringSchedulesTable).set(updates).where(eq(recurringSchedulesTable.id, id)).returning();
-  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
-  res.json(await enrichSchedule(updated));
+  try {
+    const body = req.body ?? {};
+    const updated = await m("recurringSchedules:update", {
+      id: asId(req.params.id),
+      ...(body.employeeId !== undefined ? { employeeId: body.employeeId ? asId(body.employeeId) : undefined } : {}),
+      ...(body.serviceType !== undefined ? { serviceType: String(body.serviceType) } : {}),
+      ...(body.intervalType !== undefined ? { intervalType: String(body.intervalType) } : {}),
+      ...(body.customDays !== undefined ? { customDays: Number(body.customDays) } : {}),
+      ...(body.revenue !== undefined ? { revenue: Number(body.revenue) } : {}),
+      ...(body.notes !== undefined ? { notes: body.notes ? String(body.notes) : undefined } : {}),
+    });
+    if (!updated) return res.status(404).json({ error: "Not found" });
+    return res.json(updated);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to update recurring schedule", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.delete("/recurring-schedules/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  await db.delete(recurringSchedulesTable).where(eq(recurringSchedulesTable.id, id));
-  res.status(204).send();
+  try {
+    await m("recurringSchedules:remove", { id: asId(req.params.id) });
+    return res.status(204).send();
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete recurring schedule", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.post("/recurring-schedules/:id/pause", async (req, res) => {
-  const id = Number(req.params.id);
-  const [updated] = await db.update(recurringSchedulesTable).set({ status: "paused" }).where(eq(recurringSchedulesTable.id, id)).returning();
-  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
-  res.json(await enrichSchedule(updated));
+  try {
+    return res.json(await m("recurringSchedules:pause", { id: asId(req.params.id) }));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to pause recurring schedule", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.post("/recurring-schedules/:id/resume", async (req, res) => {
-  const id = Number(req.params.id);
-  const [updated] = await db.update(recurringSchedulesTable).set({ status: "active" }).where(eq(recurringSchedulesTable.id, id)).returning();
-  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
-  res.json(await enrichSchedule(updated));
+  try {
+    return res.json(await m("recurringSchedules:resume", { id: asId(req.params.id) }));
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to resume recurring schedule", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 export default router;

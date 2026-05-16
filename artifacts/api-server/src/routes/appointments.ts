@@ -1,56 +1,40 @@
 import { Router } from "express";
-import { db } from "@workspace/db";
-import { appointments } from "@workspace/db/schema";
-import { eq, or } from "drizzle-orm";
-import { z } from "zod/v4";
+import { m, q, asId } from "../lib/convex-utils";
 
 const router = Router();
 
-const CreateBody = z.object({
-  title: z.string().min(1),
-  description: z.string().optional(),
-  date: z.string().min(1),
-  startTime: z.string().min(1),
-  endTime: z.string().optional(),
-  type: z.enum(["meeting", "site-visit", "call", "internal", "other"]).default("meeting"),
-  participants: z.string().optional(),
-  location: z.string().optional(),
-  notes: z.string().optional(),
-  createdBy: z.string().optional(),
-  calendarOwner: z.enum(["manager", "supervisor", "shared"]).default("manager"),
-});
-
-const UpdateBody = CreateBody.partial();
-
 router.get("/appointments", async (req, res) => {
   try {
-    const owner = req.query.owner as string | undefined;
-    let rows;
-    if (owner === "manager") {
-      rows = await db.select().from(appointments)
-        .where(or(eq(appointments.calendarOwner, "manager"), eq(appointments.calendarOwner, "shared")))
-        .orderBy(appointments.date, appointments.startTime);
-    } else if (owner === "supervisor") {
-      rows = await db.select().from(appointments)
-        .where(or(eq(appointments.calendarOwner, "supervisor"), eq(appointments.calendarOwner, "shared")))
-        .orderBy(appointments.date, appointments.startTime);
-    } else {
-      rows = await db.select().from(appointments).orderBy(appointments.date, appointments.startTime);
-    }
-    res.json(rows);
+    const owner = req.query.owner ? String(req.query.owner) : undefined;
+    const date = req.query.date ? String(req.query.date) : undefined;
+    return res.json(await q("appointments:list", {
+      ...(owner ? { calendarOwner: owner } : {}),
+      ...(date ? { date } : {}),
+    }));
   } catch (err) {
     req.log.error(err, "Failed to list appointments");
-    res.status(500).json({ error: "Failed to list appointments" });
+    return res.status(500).json({ error: "Failed to list appointments" });
   }
 });
 
 router.post("/appointments", async (req, res) => {
   try {
-    const body = CreateBody.parse(req.body);
-    const [created] = await db.insert(appointments).values(body).returning();
-    return res.status(201).json(created);
+    const body = req.body ?? {};
+    const id = await m("appointments:create", {
+      title: String(body.title ?? "Appointment"),
+      ...(body.description ? { description: String(body.description) } : {}),
+      date: String(body.date ?? ""),
+      startTime: String(body.startTime ?? ""),
+      ...(body.endTime ? { endTime: String(body.endTime) } : {}),
+      ...(body.type ? { type: String(body.type) } : {}),
+      ...(body.participants ? { participants: String(body.participants) } : {}),
+      ...(body.location ? { location: String(body.location) } : {}),
+      ...(body.notes ? { notes: String(body.notes) } : {}),
+      ...(body.createdBy ? { createdBy: String(body.createdBy) } : {}),
+      ...(body.calendarOwner ? { calendarOwner: String(body.calendarOwner) } : {}),
+    });
+    return res.status(201).json({ id });
   } catch (err) {
-    if (err instanceof z.ZodError) return res.status(400).json({ error: err.message });
     req.log.error(err, "Failed to create appointment");
     return res.status(500).json({ error: "Failed to create appointment" });
   }
@@ -58,13 +42,22 @@ router.post("/appointments", async (req, res) => {
 
 router.put("/appointments/:id", async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    const body = UpdateBody.parse(req.body);
-    const [updated] = await db.update(appointments).set(body).where(eq(appointments.id, id)).returning();
+    const body = req.body ?? {};
+    const updated = await m("appointments:update", {
+      id: asId(req.params.id),
+      ...(body.title !== undefined ? { title: String(body.title) } : {}),
+      ...(body.description !== undefined ? { description: body.description ? String(body.description) : undefined } : {}),
+      ...(body.date !== undefined ? { date: String(body.date) } : {}),
+      ...(body.startTime !== undefined ? { startTime: String(body.startTime) } : {}),
+      ...(body.endTime !== undefined ? { endTime: body.endTime ? String(body.endTime) : undefined } : {}),
+      ...(body.type !== undefined ? { type: String(body.type) } : {}),
+      ...(body.participants !== undefined ? { participants: body.participants ? String(body.participants) : undefined } : {}),
+      ...(body.location !== undefined ? { location: body.location ? String(body.location) : undefined } : {}),
+      ...(body.notes !== undefined ? { notes: body.notes ? String(body.notes) : undefined } : {}),
+    });
     if (!updated) return res.status(404).json({ error: "Not found" });
     return res.json(updated);
   } catch (err) {
-    if (err instanceof z.ZodError) return res.status(400).json({ error: err.message });
     req.log.error(err, "Failed to update appointment");
     return res.status(500).json({ error: "Failed to update appointment" });
   }
@@ -72,11 +65,8 @@ router.put("/appointments/:id", async (req, res) => {
 
 router.delete("/appointments/:id", async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    const [deleted] = await db.delete(appointments).where(eq(appointments.id, id)).returning();
-    if (!deleted) return res.status(404).json({ error: "Not found" });
-    res.status(204).end();
-    return;
+    await m("appointments:remove", { id: asId(req.params.id) });
+    return res.status(204).end();
   } catch (err) {
     req.log.error(err, "Failed to delete appointment");
     return res.status(500).json({ error: "Failed to delete appointment" });
