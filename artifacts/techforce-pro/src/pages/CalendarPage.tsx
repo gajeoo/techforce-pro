@@ -9,10 +9,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  getJobs, getCustomers, getEmployees, createJob,
-  type ApiJob, type ApiCustomer, type ApiEmployee,
-} from "@/lib/api";
+import { useQuery, useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
+
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -78,11 +77,12 @@ function AddJobDialog({
 }: {
   open: boolean;
   date: string;
-  customers: ApiCustomer[];
-  employees: ApiEmployee[];
+  customers: any[];
+  employees: any[];
   onClose: () => void;
-  onSaved: (job: ApiJob) => void;
+  onSaved: (job: any) => void;
 }) {
+  const createJobFn = useMutation(api.jobs.create);
   const [customerId,   setCustomerId]   = useState("");
   const [employeeId,   setEmployeeId]   = useState("");
   const [serviceType,  setServiceType]  = useState("");
@@ -103,7 +103,7 @@ function AddJobDialog({
     if (!customerId || !serviceType) return;
     setSaving(true);
     try {
-      const job = await createJob({
+      const job = await createJobFn({
         customerId:             Number(customerId),
         employeeId:             employeeId ? Number(employeeId) : null,
         serviceType,
@@ -267,23 +267,16 @@ export function CalendarPage() {
   const [addJobDate,  setAddJobDate]  = useState("");
   const [addJobOpen,  setAddJobOpen]  = useState(false);
 
-  const [jobs,      setJobs]      = useState<ApiJob[]>([]);
-  const [customers, setCustomers] = useState<ApiCustomer[]>([]);
-  const [employees, setEmployees] = useState<ApiEmployee[]>([]);
+  const jobs      = (useQuery(api.jobs.list)       ?? []) as any[];
+  const customers = (useQuery(api.customers.list) ?? []) as any[];
+  const employees = (useQuery(api.employees.list) ?? []) as any[];
   const [loading,   setLoading]   = useState(true);
 
-  useEffect(() => {
-    Promise.all([
-      getJobs().then(setJobs),
-      getCustomers().then(setCustomers),
-      getEmployees().then(setEmployees),
-    ]).finally(() => setLoading(false));
-  }, []);
 
   const calendarDays = useMemo(() => getCalendarGrid(year, month), [year, month]);
 
   const jobsByDate = useMemo(() => {
-    const map: Record<string, ApiJob[]> = {};
+    const map: Record<string, any[]> = {};
     jobs.forEach(j => {
       if (j.scheduledDate) {
         const d = j.scheduledDate.slice(0, 10);
@@ -390,9 +383,7 @@ export function CalendarPage() {
         </div>
       </div>
 
-      {loading ? (
-        <div className="text-center py-20 text-muted-foreground text-sm">Loading calendar…</div>
-      ) : view === "month" ? (
+      {view === "month" ? (
         <div className="flex gap-4">
           {/* Calendar Grid */}
           <div className="flex-1 rounded-xl border border-border bg-card overflow-hidden">
@@ -660,8 +651,7 @@ export function CalendarPage() {
         employees={employees}
         onClose={() => setAddJobOpen(false)}
         onSaved={job => {
-          setJobs(prev => [...prev, job]);
-          setAddJobOpen(false);
+                    setAddJobOpen(false);
           setSelectedDay(addJobDate);
         }}
       />
