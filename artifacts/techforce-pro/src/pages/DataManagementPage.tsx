@@ -1,10 +1,12 @@
-import { useState, useRef, useMemo, useEffect } from "react";
+import { useState, useRef, useMemo } from "react";
 import {
   Database, Download, Upload, Trash2, Play, CheckCircle2,
   AlertTriangle, FileJson, Users, Building2, Briefcase,
   FileText, RefreshCw, Info, Package, FileCode2, TableProperties,
-  ChevronRight, Search, ArrowLeft, DollarSign, X, ServerOff,
+  ChevronRight, Search, ArrowLeft, DollarSign, X,
 } from "lucide-react";
+import { useMutation, useConvex } from "convex/react";
+import { anyApi } from "convex/server";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -13,28 +15,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import {
-  adminSeedDemo, adminClearAll, adminExport, adminImport,
-  type AdminExportData, API_BASE,
-} from "@/lib/api";
+import { type AdminExportData } from "@/lib/api";
 import { toast } from "sonner";
-
-// ─── Backend availability ─────────────────────────────────────────────────────
-
-function is404(e: unknown) {
-  return e instanceof Error && e.message.includes("(404)");
-}
-
-const BACKEND_MSG = "The backend server is not available on this deployment. Run TechForce Pro locally or on Replit to use data management features.";
-
-async function checkBackend(): Promise<boolean> {
-  try {
-    const r = await fetch(`${API_BASE}/health`, { method: "GET" });
-    return r.status !== 404;
-  } catch {
-    return false;
-  }
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -468,21 +450,27 @@ function DemoDataTab() {
   const [clearStep, setClearStep] = useState<0 | 1 | 2>(0);
   const [lastSeed,  setLastSeed]  = useState<string[] | null>(null);
 
+  const seedDemo  = useMutation(anyApi.admin.seedDemo);
+  const doCleanAll = useMutation(anyApi.admin.clearAll);
+
   async function handleSeed() {
     setSeeding(true);
     try {
-      const result = await adminSeedDemo();
+      const result = await seedDemo({}) as { success: boolean; seeded: Record<string, unknown> };
       resetLicenseSeed();
+      const s = result.seeded;
+      const toArr = (v: unknown, label: string) =>
+        Array.isArray(v) ? (v as string[]) : [`${v} ${label}`];
       setLastSeed([
-        ...result.seeded.employees,
-        ...result.seeded.customers,
-        `${result.seeded.jobs} jobs`,
-        `${result.seeded.invoices} invoices`,
-        `${result.seeded.locations} locations`,
+        ...toArr(s.employees, "employees"),
+        ...toArr(s.customers, "customers"),
+        `${s.jobs} jobs`,
+        `${s.invoices} invoices`,
+        `${s.locations} locations`,
       ]);
       toast.success("Demo data loaded! All pages are now populated.");
     } catch (e) {
-      toast.error(is404(e) ? BACKEND_MSG : (e instanceof Error ? e.message : "Failed to seed demo data"));
+      toast.error(e instanceof Error ? e.message : "Failed to seed demo data");
     } finally {
       setSeeding(false);
     }
@@ -492,12 +480,12 @@ function DemoDataTab() {
     setClearStep(0);
     setClearing(true);
     try {
-      await adminClearAll();
+      await doCleanAll({});
       clearLocalStorage();
       setLastSeed(null);
       toast.success("All data cleared. The slate is clean — ready for real data.");
     } catch (e) {
-      toast.error(is404(e) ? BACKEND_MSG : "Failed to clear data");
+      toast.error(e instanceof Error ? e.message : "Failed to clear data");
     } finally {
       setClearing(false);
     }
@@ -594,11 +582,16 @@ function DemoDataTab() {
 function ExportTab() {
   const [exporting, setExporting] = useState(false);
   const [data, setData] = useState<AdminExportData | null>(null);
+  const convex = useConvex();
 
   async function fetchExport() {
     setExporting(true);
-    try { const r = await adminExport(); setData(r); return r; }
-    catch (e) { toast.error(is404(e) ? BACKEND_MSG : "Export failed"); return null; }
+    try {
+      const r = await convex.query(anyApi.admin.exportAll, {}) as AdminExportData;
+      setData(r);
+      return r;
+    }
+    catch (e) { toast.error(e instanceof Error ? e.message : "Export failed"); return null; }
     finally { setExporting(false); }
   }
 
@@ -613,8 +606,11 @@ function ExportTab() {
     let source = data;
     if (!source) {
       setExporting(true);
-      try { source = await adminExport(); setData(source); }
-      catch (e) { toast.error(is404(e) ? BACKEND_MSG : "Export failed"); setExporting(false); return; }
+      try {
+        source = await convex.query(anyApi.admin.exportAll, {}) as AdminExportData;
+        setData(source);
+      }
+      catch (e) { toast.error(e instanceof Error ? e.message : "Export failed"); setExporting(false); return; }
       finally { setExporting(false); }
     }
     const rows = source.data[key] as unknown as Record<string, unknown>[];
@@ -1483,15 +1479,17 @@ function ImportTab() {
     reader.readAsText(file);
   }
 
+  const doImport = useMutation(anyApi.admin.importAll);
+
   async function handleImport(data: ParsedData, clearFirst: boolean) {
     setImporting(true);
     try {
-      const result = await adminImport(data as Record<string, unknown[]>, clearFirst);
+      const result = await doImport({ data: data as Record<string, unknown[]>, clearFirst }) as { success: boolean; imported: Record<string, number> };
       const summary = Object.entries(result.imported).map(([k, v]) => `${v} ${k}`).join(", ");
       toast.success(`Import complete: ${summary || "no records"}`);
       resetFile();
     } catch (e) {
-      toast.error(is404(e) ? BACKEND_MSG : (e instanceof Error ? e.message : "Import failed"));
+      toast.error(e instanceof Error ? e.message : "Import failed");
     } finally {
       setImporting(false);
     }
@@ -1594,12 +1592,6 @@ function ImportTab() {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function DataManagementPage() {
-  const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    checkBackend().then(setBackendAvailable);
-  }, []);
-
   return (
     <div className="space-y-6 max-w-5xl">
       <div>
@@ -1611,20 +1603,6 @@ export function DataManagementPage() {
           Import from ServiceFusion or CSV, export backups, and manage demo data.
         </p>
       </div>
-
-      {backendAvailable === false && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-800 dark:text-amber-300 flex gap-3">
-          <ServerOff className="size-4 shrink-0 mt-0.5" />
-          <div>
-            <p className="font-semibold mb-1">Backend server not available</p>
-            <p>
-              Data management features (import, export, seed/clear) require the TechForce Pro
-              backend server. This Vercel deployment is a static preview — run the app on{" "}
-              <strong>Replit</strong> or a self-hosted server to use these features.
-            </p>
-          </div>
-        </div>
-      )}
 
       <Tabs defaultValue="import">
         <TabsList className="grid w-full grid-cols-3">
