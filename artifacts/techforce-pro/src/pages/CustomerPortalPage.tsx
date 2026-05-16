@@ -615,7 +615,7 @@ export function CustomerPortalPage() {
   // ── Handle service request submission ──
   async function handleServiceRequest() {
     if (!reqServiceType) return;
-    const custDocId = myCust?._id ?? allCustomers[0]?._id;
+    const custDocId = myCust?._id;
     if (!custDocId) { toast.error("Unable to identify your account. Please reload."); return; }
     setReqSaving(true);
     try {
