@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ConvexJob, ConvexCustomer } from "@/lib/convex-types";
 import {
   AlertTriangle, ArrowLeft, Building2, Calendar, CheckCircle2,
   Clock, FileText, MapPin, ShieldX, Users,
@@ -8,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { getJobs, type ApiJob } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import {
   loadNCNotices,
   acknowledgeNCNotice,
@@ -31,20 +33,16 @@ export function CustomerNonCompliancePage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [notices, setNotices] = useState<NCNotice[]>([]);
-  const [ncJobs, setNcJobs] = useState<ApiJob[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const customerId = Number(user?.id ?? 0);
-    const all = loadNCNotices();
-    const mine = all.filter(n => n.customerId === customerId);
-    setNotices(mine.sort((a, b) => b.sentAt.localeCompare(a.sentAt)));
-
-    getJobs({ customerId: String(customerId) })
-      .then(jobs => setNcJobs(jobs.filter(j => j.status === "non_compliant")))
-      .catch(() => setNcJobs([]))
-      .finally(() => setLoading(false));
-  }, [user?.id]);
+  const rawJobs = (useQuery(api.jobs.list) ?? []) as ConvexJob[];
+  const allCustomers = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
+  // Sort by creation time for deterministic ordering, then index by numeric auth ID
+  const custId = parseInt((user?.id ?? "").replace(/\D/g, "")) || 1;
+  const sortedCustomers = [...allCustomers].sort((a, b) => a._creationTime - b._creationTime);
+  const myCust: ConvexCustomer | undefined = sortedCustomers[custId - 1];
+  // Never fall back to showing all jobs — show nothing while loading or if lookup fails
+  const allJobs = myCust ? rawJobs.filter(j => j.customerId === myCust._id) : [];
+  const ncJobs = allJobs.filter(j => j.status === "non_compliant");
+  
 
   function handleAcknowledge(id: string) {
     acknowledgeNCNotice(id);
@@ -102,7 +100,7 @@ export function CustomerNonCompliancePage() {
       </div>
 
       {/* Non-compliant jobs from API */}
-      {!loading && ncJobs.length > 0 && (
+      {ncJobs.length > 0 && (
         <Card className="border-destructive/30">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2 text-destructive">
