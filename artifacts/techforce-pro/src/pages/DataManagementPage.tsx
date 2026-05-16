@@ -472,12 +472,7 @@ export function DataManagementPage() {
     const rows = parseCsv(text);
     if (!rows.length) { toast.error("CSV has no data rows"); return; }
     const headers = Object.keys(rows[0] ?? {});
-    let entity = detectEntity(filename) ?? detectEntityFromHeaders(headers);
-    if (!entity) {
-      // Last-ditch: default to employees if file looks like a list of people
-      const norm = headers.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ""));
-      if (norm.includes("name")) entity = "employees";
-    }
+    const entity = detectEntity(filename) ?? detectEntityFromHeaders(headers);
     if (!entity) {
       toast.error(`Can't detect entity from "${filename}" or its columns (${headers.slice(0,5).join(", ")}…). Rename file to employees.csv / customers.csv / jobs.csv / invoices.csv, or include a recognizable column.`);
       return;
@@ -490,7 +485,9 @@ export function DataManagementPage() {
   function parseXlsxFile(buffer: ArrayBuffer, filename: string) {
     import("xlsx").then(XLSX => {
       const wb = XLSX.read(buffer, { type: "array" });
-      const bundle: DataBundle = {};
+      const bundle: Record<string, Record<string, unknown>[]> = {};
+      const detections: string[] = [];
+      const skipped: string[] = [];
       for (const sheetName of wb.SheetNames) {
         const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[sheetName]);
         if (!rows.length) continue;
@@ -499,9 +496,13 @@ export function DataManagementPage() {
           detectEntity(sheetName) ??
           detectEntity(filename) ??
           detectEntityFromHeaders(headers);
-        if (!entity) continue;
-        (bundle as Record<string, unknown[]>)[entity] = rows;
+        if (!entity) { skipped.push(sheetName); continue; }
+        if (bundle[entity]) bundle[entity].push(...rows);
+        else bundle[entity] = rows;
+        detections.push(`${sheetName} → ${entity} (${rows.length})`);
       }
+      if (detections.length) toast.success(`Detected sheets: ${detections.join("; ")}`);
+      if (skipped.length) toast.warning(`Skipped unrecognized sheet(s): ${skipped.join(", ")}`);
       if (!Object.keys(bundle).length) {
         toast.error("No recognisable entity sheets found in the workbook.");
         return;
