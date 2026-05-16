@@ -15,7 +15,7 @@ import {
   UserPlus,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
@@ -30,7 +30,8 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { getEmployees, type ApiEmployee } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,13 +49,13 @@ const WORK_DAYS = 22;
 
 // ─── Employee → TechRow conversion ───────────────────────────────────────────
 
-function empToTechRow(emp: ApiEmployee): TechRow {
+function empToTechRow(emp: any): TechRow {
   // Monthly shop-day allowance: treat allowedShopDays as monthly baseline for the simulator
   // (suppression=2, extinguisher=5, helper=12 give meaningful monthly starting points)
-  const shopDays    = Math.max(0, emp.allowedShopDays);
-  const maxShopDays = Math.max(shopDays, emp.allowedShopDays);
+  const shopDays    = Math.max(0, emp.allowedShopDays ?? 0);
+  const maxShopDays = Math.max(shopDays, emp.allowedShopDays ?? 0);
   return {
-    id:          String(emp.id),
+    id:          String(emp._id ?? emp.id),
     name:        emp.name,
     salary:      emp.salary,
     dailyRate:   emp.billableRate,
@@ -133,22 +134,13 @@ function calcTechProfit(t: TechRow) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function ShopDayCalculatorPage() {
+  const apiEmps = (useQuery(api.employees.list) ?? []) as any[];
+
   const [techs, setTechs]   = useState<TechRow[]>([]);
-  const [loading, setLoading] = useState(true);
   const [showHowTo, setShowHowTo] = useState(false);
   const baselineRef = useRef<TechRow[]>([]);
 
   // Load real employees from API on mount
-  useEffect(() => {
-    getEmployees()
-      .then(emps => {
-        const rows = emps.filter(e => e.isActive).map(empToTechRow);
-        setTechs(rows);
-        baselineRef.current = rows;
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
 
   const updateTech = useCallback((id: string, field: keyof TechRow, value: number) => {
     setTechs(prev => prev.map(t => t.id === id ? { ...t, [field]: value } : t));
@@ -238,7 +230,7 @@ export function ShopDayCalculatorPage() {
     a.click();
   }
 
-  if (loading) {
+  if (!apiEmps.length) {
     return (
       <div className="flex items-center justify-center py-24">
         <Loader2 className="size-6 animate-spin text-muted-foreground mr-3" />
