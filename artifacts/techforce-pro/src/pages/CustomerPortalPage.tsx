@@ -1,3 +1,4 @@
+import { serviceTypeLabel } from "@/lib/utils";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { downloadDocument } from "@/lib/docDownload";
 import { toast } from "sonner";
@@ -65,16 +66,10 @@ import {
   type Attachment,
   type Message,
 } from "@/lib/messaging";
-import {
-  getEmployees,
-  getJobs,
-  getInvoices,
-  createJob,
-  serviceTypeLabel,
-  type ApiEmployee,
-  type ApiJob,
-  type ApiInvoice,
-} from "@/lib/api";
+import { useQuery, useMutation } from "convex/react";
+import type { ConvexJob, ConvexCustomer, ConvexInvoice, ConvexEmployee, ConvexServiceRequest } from "@/lib/convex-types";
+import { api } from "@/convex/_generated/api";
+
 import { downloadInvoicePdf } from "@/lib/docDownload";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
@@ -232,6 +227,7 @@ function ScanInvoiceDialog({ open, onClose }: { open: boolean; onClose: () => vo
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageBase64, mimeType }),
       });
+      if (!resp.ok) throw new Error("unavailable");
       const result = await resp.json();
       if (result.success && result.data) {
         setScannedData(result.data);
@@ -247,7 +243,7 @@ function ScanInvoiceDialog({ open, onClose }: { open: boolean; onClose: () => vo
         setStep("upload");
       }
     } catch {
-      toast.error("Analysis failed — please try again.");
+      toast.error("AI invoice scanning is not available on this deployment.");
       setStep("upload");
     }
   }
@@ -286,24 +282,13 @@ function ScanInvoiceDialog({ open, onClose }: { open: boolean; onClose: () => vo
               <p className="text-sm text-muted-foreground">
                 Take a photo of your paper invoice. AI will extract the template structure so you can confirm or edit the line items before submitting.
               </p>
-              <input
-                ref={fileRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={handleFile}
-                aria-label="Upload invoice image"
-                title="Upload invoice image"
-              />
+              <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
               {imagePreview ? (
                 <div className="relative rounded-xl overflow-hidden border">
                   <img src={imagePreview} alt="Invoice preview" className="w-full max-h-64 object-contain bg-muted/30" />
                   <button
-                    type="button"
                     className="absolute top-2 right-2 bg-black/60 text-white rounded-full p-1 hover:bg-black/80"
                     onClick={() => { setImagePreview(null); setImageBase64(""); if (fileRef.current) fileRef.current.value = ""; }}
-                    aria-label="Remove selected image"
-                    title="Remove selected image"
                   >
                     <X className="size-3.5" />
                   </button>
@@ -396,8 +381,6 @@ function ScanInvoiceDialog({ open, onClose }: { open: boolean; onClose: () => vo
                               value={item.qty}
                               min={1}
                               onChange={e => updateItem(i, "qty", Number(e.target.value))}
-                              aria-label={`Quantity for ${item.name || `row ${i + 1}`}`}
-                              title="Item quantity"
                             />
                           </td>
                           <td className="px-2 py-1.5">
@@ -407,18 +390,10 @@ function ScanInvoiceDialog({ open, onClose }: { open: boolean; onClose: () => vo
                               value={item.unitPrice}
                               min={0}
                               onChange={e => updateItem(i, "unitPrice", Number(e.target.value))}
-                              aria-label={`Unit price for ${item.name || `row ${i + 1}`}`}
-                              title="Unit price"
                             />
                           </td>
                           <td className="px-1 py-1.5 text-center">
-                            <button
-                              type="button"
-                              onClick={() => removeItem(i)}
-                              className="text-muted-foreground hover:text-destructive transition-colors"
-                              aria-label={`Remove line item ${i + 1}`}
-                              title="Remove line item"
-                            >
+                            <button onClick={() => removeItem(i)} className="text-muted-foreground hover:text-destructive transition-colors">
                               <X className="size-3.5" />
                             </button>
                           </td>
@@ -487,32 +462,28 @@ export function CustomerPortalPage() {
   const userId   = user?.id ?? "cust-1";
   const userName = user?.name ?? "Customer";
 
-  // ── Real API data ──
-  const [staffList, setStaffList] = useState<ApiEmployee[]>([]);
-  const [apiJobs, setApiJobs] = useState<ApiJob[]>([]);
-  const [apiInvoices, setApiInvoices] = useState<ApiInvoice[]>([]);
-  const [loadingApi, setLoadingApi] = useState(true);
+  // ── Real data from Convex ──
+  const allEmployees   = (useQuery(api.employees.list) ?? []) as ConvexEmployee[];
+  const allCustomers   = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
+  const apiJobs        = (useQuery(api.jobs.list)       ?? []) as ConvexJob[];
+  const apiInvoices    = (useQuery(api.invoices.list)   ?? []) as ConvexInvoice[];
+  const convexRequests = (useQuery(api.serviceRequests.list, {}) ?? []) as ConvexServiceRequest[];
+  const createServiceRequest = useMutation(api.serviceRequests.create);
+  const staffList      = allEmployees.filter(e => e.role === "admin" || e.role === "suppression_lead");
 
   // Parse numeric customer ID from auth userId (e.g. "cust-1" → 1, "1" → 1)
   const customerId = parseInt(userId.replace(/\D/g, "")) || 1;
+  // Sort by creation time for deterministic ordering, then index by numeric auth ID
+  const sortedCustomers = [...allCustomers].sort((a, b) => a._creationTime - b._creationTime);
+  const myCust: ConvexCustomer | undefined = sortedCustomers[customerId - 1];
 
-  useEffect(() => {
-    Promise.all([
-      getEmployees().then(emps =>
-        setStaffList(emps.filter(e => e.role === "admin" || e.role === "suppression_lead"))
-      ),
-      getJobs().then(setApiJobs),
-      getInvoices().then(setApiInvoices),
-    ]).finally(() => setLoadingApi(false));
-  }, []);
-
-  // Derived: jobs + invoices for this customer
-  const myJobs = apiJobs.filter(j => j.customerId === customerId);
-  const myInvoices = apiInvoices.filter(inv => inv.customerId === customerId);
-  const upcomingApiJobs = myJobs
+  // Derived: jobs + invoices scoped to this customer — never fall back to all data while loading
+  const myJobs     = myCust ? apiJobs.filter(j     => j.customerId    === myCust._id) : [];
+  const myInvoices = myCust ? apiInvoices.filter(inv => inv.customerId === myCust._id) : [];
+  const upcomingJobs = myJobs
     .filter(j => j.status !== "completed")
     .sort((a, b) => (a.scheduledDate ?? "").localeCompare(b.scheduledDate ?? ""));
-  const completedApiJobs = myJobs.filter(j => j.status === "completed");
+  const completedJobs = myJobs.filter(j => j.status === "completed");
   const unpaidInvoices = myInvoices.filter(inv => inv.status !== "paid");
   const totalOutstanding = unpaidInvoices.reduce((s, inv) => s + inv.totalAmount, 0);
 
@@ -529,7 +500,7 @@ export function CustomerPortalPage() {
     id: String(e.id),
     name: e.name,
     role: e.role === "admin" ? "Manager" : "Supervisor",
-    subtitle: e.role.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
+    subtitle: e.role.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()),
   }));
 
   // ── Overview state ──
@@ -626,18 +597,8 @@ export function CustomerPortalPage() {
 
   const locationCommsData = historyLocation ? (locationComms[historyLocation] ?? []) : [];
 
-  // ── My service requests (from real API) ──
-  const [myRequests, setMyRequests] = useState<Array<{
-    id: number; serviceType: string; location: string | null; preferredDate: string | null;
-    urgency: string; status: string; managerMessage: string | null; createdAt: string;
-  }>>([]);
-
-  function loadMyRequests() {
-    fetch(`/api/service-requests?customerId=${customerId}`)
-      .then(r => r.ok ? r.json() : []).then(setMyRequests).catch(() => {});
-  }
-
-  useEffect(() => { loadMyRequests(); }, [customerId]);
+  // ── My service requests (live from Convex) ──
+  // convexRequests is already loaded above in the hooks block
 
   const requestStatusConfig: Record<string, { label: string; color: string }> = {
     pending:    { label: "Pending",    color: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" },
@@ -650,26 +611,20 @@ export function CustomerPortalPage() {
   // ── Handle service request submission ──
   async function handleServiceRequest() {
     if (!reqServiceType) return;
+    const custDocId = myCust?._id ?? allCustomers[0]?._id;
+    if (!custDocId) { toast.error("Unable to identify your account. Please reload."); return; }
     setReqSaving(true);
     try {
       const urgencyMap: Record<string, string> = { routine: "normal", soon: "normal", urgent: "urgent", emergency: "urgent" };
-      await fetch("/api/service-requests", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          customerId,
-          customerName: userName,
-          serviceType: reqServiceType,
-          description: reqNotes || null,
-          location: reqLocation || null,
-          preferredDate: reqDate || null,
-          urgency: urgencyMap[reqUrgency] ?? "normal",
-        }),
+      await createServiceRequest({
+        customerId: custDocId,
+        serviceType: reqServiceType,
+        urgency: urgencyMap[reqUrgency] ?? "normal",
+        description: reqNotes || undefined,
       });
       toast.success("Service request submitted! We'll be in touch shortly.");
       setRequestOpen(false);
       setReqLocation(""); setReqServiceType(""); setReqUrgency(""); setReqDate(""); setReqNotes("");
-      loadMyRequests();
     } catch {
       toast.error("Failed to submit request. Please try again.");
     } finally {
@@ -709,80 +664,21 @@ export function CustomerPortalPage() {
         </div>
       </div>
 
-      {/* Compliance Score Banner */}
-      {(() => {
-        const compliant  = customerLocations.filter(l => l.status === "current").length;
-        const dueSoon    = customerLocations.filter(l => l.status === "due-soon").length;
-        const overdue    = customerLocations.filter(l => l.status === "overdue").length;
-        const total      = customerLocations.length;
-        const score      = Math.round((compliant / total) * 100);
-        const passCount  = pastInspections.filter(i => i.result === "pass").length;
-        const totalInsp  = pastInspections.length;
-        const passRate   = totalInsp > 0 ? Math.round((passCount / totalInsp) * 100) : 0;
-        const defTotal   = pastInspections.reduce((s, i) => s + i.deficiencies, 0);
-        const scoreColor = score >= 90 ? "text-emerald-600" : score >= 70 ? "text-amber-600" : "text-red-600";
-        const bgColor    = score >= 90 ? "border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/20" : score >= 70 ? "border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20" : "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20";
-        return (
-          <div className={`rounded-xl border p-4 flex flex-col sm:flex-row sm:items-center gap-4 ${bgColor}`}>
-            <div className="flex items-center gap-4 flex-1">
-              {/* Score ring */}
-              <div className="relative shrink-0">
-                <svg viewBox="0 0 64 64" className="size-16 -rotate-90">
-                  <circle cx="32" cy="32" r="26" fill="none" stroke="currentColor" strokeOpacity={0.12} strokeWidth="7" />
-                  <circle
-                    cx="32" cy="32" r="26"
-                    fill="none"
-                    stroke={score >= 90 ? "#22c55e" : score >= 70 ? "#f59e0b" : "#ef4444"}
-                    strokeWidth="7"
-                    strokeDasharray={`${2 * Math.PI * 26}`}
-                    strokeDashoffset={`${2 * Math.PI * 26 * (1 - score / 100)}`}
-                    strokeLinecap="round"
-                  />
-                </svg>
-                <div className="absolute inset-0 flex items-center justify-center rotate-0">
-                  <span className={`text-sm font-extrabold ${scoreColor}`}>{score}%</span>
-                </div>
-              </div>
-              <div>
-                <div className="text-sm font-bold">Compliance Score</div>
-                <div className="text-xs text-muted-foreground mt-0.5">
-                  {compliant} current · {dueSoon > 0 ? `${dueSoon} due soon · ` : ""}{overdue > 0 ? `${overdue} overdue` : "no overdue"}
-                </div>
-              </div>
-            </div>
-            <div className="flex gap-6 text-center sm:ml-auto sm:pl-4 sm:border-l border-current/10">
-              <div>
-                <div className="text-xl font-extrabold text-emerald-600">{passRate}%</div>
-                <div className="text-[10px] text-muted-foreground">Pass Rate</div>
-              </div>
-              <div>
-                <div className="text-xl font-extrabold">{totalInsp}</div>
-                <div className="text-[10px] text-muted-foreground">Inspections</div>
-              </div>
-              <div>
-                <div className={`text-xl font-extrabold ${defTotal > 0 ? "text-amber-600" : "text-emerald-600"}`}>{defTotal}</div>
-                <div className="text-[10px] text-muted-foreground">Deficiencies</div>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
       {/* Account Summary */}
       <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
         <Card><CardContent className="p-4">
           <div className="text-[10px] font-semibold text-muted-foreground uppercase mb-1">Open Balance</div>
           <div className="text-xl font-extrabold text-amber-600">
-            {loadingApi ? "—" : `$${totalOutstanding.toLocaleString()}`}
+            {`$${totalOutstanding.toLocaleString()}`}
           </div>
           <div className="text-[10px] text-muted-foreground">{unpaidInvoices.length} unpaid invoice{unpaidInvoices.length !== 1 ? "s" : ""}</div>
         </CardContent></Card>
         <Card><CardContent className="p-4">
           <div className="text-[10px] font-semibold text-muted-foreground uppercase mb-1">Scheduled Jobs</div>
           <div className="text-xl font-extrabold text-primary">
-            {loadingApi ? "—" : upcomingApiJobs.length}
+            {upcomingJobs.length}
           </div>
-          <div className="text-[10px] text-muted-foreground">{completedApiJobs.length} completed YTD</div>
+          <div className="text-[10px] text-muted-foreground">{completedJobs.length} completed YTD</div>
         </CardContent></Card>
         <Card><CardContent className="p-4">
           <div className="text-[10px] font-semibold text-muted-foreground uppercase mb-1">Contract Status</div>
@@ -823,9 +719,9 @@ export function CustomerPortalPage() {
             <TabsTrigger value="requests" className="text-xs gap-1.5">
               <ClipboardList className="size-3.5" />
               My Requests
-              {myRequests.filter(r => r.status === "in-review" || r.status === "scheduled").length > 0 && (
+              {convexRequests.filter(r => r.status === "in-review" || r.status === "scheduled").length > 0 && (
                 <Badge className="text-[9px] h-4 min-w-4 px-1 bg-primary">
-                  {myRequests.filter(r => r.status === "in-review" || r.status === "scheduled").length}
+                  {convexRequests.filter(r => r.status === "in-review" || r.status === "scheduled").length}
                 </Badge>
               )}
             </TabsTrigger>
@@ -843,7 +739,7 @@ export function CustomerPortalPage() {
                     <Calendar className="size-4 text-primary" /> Upcoming Services
                   </CardTitle>
                   <CardDescription>
-                    {loadingApi ? "Loading…" : `${upcomingApiJobs.length} scheduled job${upcomingApiJobs.length !== 1 ? "s" : ""}`}
+                    {`${upcomingJobs.length} scheduled job${upcomingJobs.length !== 1 ? "s" : ""}`}
                   </CardDescription>
                 </div>
                 <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={() => setRequestOpen(true)}>
@@ -852,9 +748,7 @@ export function CustomerPortalPage() {
               </div>
             </CardHeader>
             <CardContent>
-              {loadingApi ? (
-                <p className="text-sm text-muted-foreground text-center py-4">Loading jobs…</p>
-              ) : upcomingApiJobs.length === 0 ? (
+              {upcomingJobs.length === 0 ? (
                 <div className="text-center py-6">
                   <Calendar className="size-8 text-muted-foreground mx-auto mb-2" />
                   <p className="text-sm text-muted-foreground">No upcoming scheduled services.</p>
@@ -864,7 +758,7 @@ export function CustomerPortalPage() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {upcomingApiJobs.map(job => {
+                  {upcomingJobs.map(job => {
                     const statusColor = job.status === "completed" ? "bg-emerald-600" : job.status === "in-progress" || job.status === "in_progress" ? "bg-blue-600" : job.status === "return" || job.status === "will_return" ? "bg-amber-600" : "bg-gray-500";
                     const statusLabel = job.status === "completed" ? "Completed" : job.status === "in-progress" || job.status === "in_progress" ? "In Progress" : job.status === "return" || job.status === "will_return" ? "Return Visit" : "Pending";
                     return (
@@ -1150,15 +1044,13 @@ export function CustomerPortalPage() {
                     <Receipt className="size-4 text-primary" /> Your Invoices
                   </CardTitle>
                   <CardDescription>
-                    {loadingApi ? "Loading…" : `${myInvoices.length} invoice${myInvoices.length !== 1 ? "s" : ""} · $${totalOutstanding.toLocaleString()} outstanding`}
+                    {`${myInvoices.length} invoice${myInvoices.length !== 1 ? "s" : ""} · $${totalOutstanding.toLocaleString()} outstanding`}
                   </CardDescription>
                 </div>
               </div>
             </CardHeader>
             <CardContent>
-              {loadingApi ? (
-                <p className="text-sm text-muted-foreground text-center py-4">Loading invoices…</p>
-              ) : myInvoices.length === 0 ? (
+              {myInvoices.length === 0 ? (
                 <div className="text-center py-8">
                   <Receipt className="size-8 text-muted-foreground mx-auto mb-2" />
                   <p className="text-sm text-muted-foreground">No invoices on file yet.</p>
@@ -1399,7 +1291,7 @@ export function CustomerPortalPage() {
             </Button>
           </div>
 
-          {myRequests.length === 0 ? (
+          {convexRequests.length === 0 ? (
             <Card>
               <CardContent className="py-12 text-center">
                 <ClipboardList className="size-10 text-muted-foreground mx-auto mb-3" />
@@ -1411,15 +1303,15 @@ export function CustomerPortalPage() {
             </Card>
           ) : (
             <div className="space-y-3">
-              {myRequests.map(req => {
+              {convexRequests.map((req: any) => {
                 const cfg = requestStatusConfig[req.status] ?? { label: req.status, color: "bg-gray-100 text-gray-600" };
                 return (
-                  <Card key={req.id} className="overflow-hidden">
+                  <Card key={req._id} className="overflow-hidden">
                     <CardContent className="p-4">
                       <div className="flex items-start justify-between gap-3 flex-wrap">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <p className="text-sm font-semibold">{req.serviceType.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}</p>
+                            <p className="text-sm font-semibold">{req.serviceType.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase())}</p>
                             <Badge variant="secondary" className={`text-[10px] ${cfg.color}`}>{cfg.label}</Badge>
                             {req.urgency === "urgent" && (
                               <Badge variant="secondary" className="text-[10px] bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">Urgent</Badge>
@@ -1428,7 +1320,7 @@ export function CustomerPortalPage() {
                           <div className="flex flex-wrap gap-3 mt-1.5 text-xs text-muted-foreground">
                             {req.location && <span className="flex items-center gap-1"><MapPin className="size-3" />{req.location}</span>}
                             {req.preferredDate && <span className="flex items-center gap-1"><Calendar className="size-3" />Preferred: {req.preferredDate}</span>}
-                            <span>Submitted {new Date(req.createdAt).toLocaleDateString()}</span>
+                            <span>Submitted {new Date(req._creationTime).toLocaleDateString()}</span>
                           </div>
                           {req.managerMessage && (
                             <div className="mt-3 rounded-lg bg-primary/5 border border-primary/20 px-3 py-2.5">
@@ -1561,15 +1453,7 @@ export function CustomerPortalPage() {
                 <Button variant="outline" size="sm" className="gap-1.5 text-xs h-8" onClick={() => fileAttachRef.current?.click()}>
                   <Paperclip className="size-3" /> Choose Files
                 </Button>
-                <input
-                  ref={fileAttachRef}
-                  type="file"
-                  className="hidden"
-                  multiple
-                  onChange={handleFileSelect}
-                  aria-label="Attach files to message"
-                  title="Attach files to message"
-                />
+                <input ref={fileAttachRef} type="file" className="hidden" multiple onChange={handleFileSelect} />
               </div>
               {attachments.length > 0 && (
                 <div className="mt-2 space-y-1.5">
@@ -1578,13 +1462,7 @@ export function CustomerPortalPage() {
                       <FileText className="size-3.5 text-red-500 shrink-0" />
                       <span className="text-xs flex-1 truncate">{att.name}</span>
                       <span className="text-[10px] text-muted-foreground">{att.size}</span>
-                      <button
-                        type="button"
-                        onClick={() => setAttachments(prev => prev.filter((_, j) => j !== i))}
-                        className="text-muted-foreground hover:text-destructive"
-                        aria-label={`Remove attachment ${att.name}`}
-                        title="Remove attachment"
-                      >
+                      <button onClick={() => setAttachments(prev => prev.filter((_, j) => j !== i))} className="text-muted-foreground hover:text-destructive">
                         <X className="size-3.5" />
                       </button>
                     </div>
