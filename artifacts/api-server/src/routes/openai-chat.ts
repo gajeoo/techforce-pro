@@ -1,11 +1,6 @@
 import { Router } from "express";
 type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
-
-type AIChatMessage =
-  | { role: "system"; content: string }
-  | { role: "user"; content: string }
-  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[] }
-  | { role: "tool"; content: string; tool_call_id: string };
+type AIChatMessage = Parameters<typeof import("@workspace/integrations-openai-ai-server").openai.chat.completions.create>[0]["messages"][number];
 import { db } from "@workspace/db";
 import { conversations, messages, appointments } from "@workspace/db/schema";
 import { jobsTable as jobs, customersTable as customers, employeesTable as employees, invoicesTable as invoices, customerLocationsTable } from "@workspace/db/schema";
@@ -275,8 +270,7 @@ router.post("/chat", async (req, res) => {
       const completion = await openai.chat.completions.create({
         model: "gpt-4o",
         max_tokens: 2048,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        messages: chatMessages as any,
+        messages: chatMessages,
         tools: TOOLS,
         stream: false,
       });
@@ -369,8 +363,7 @@ router.post("/openai/conversations/:id/messages", async (req, res) => {
       const completion = await openai.chat.completions.create({
         model: "gpt-4o",
         max_tokens: 2048,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        messages: chatMessages as any,
+        messages: chatMessages,
         tools: TOOLS,
         stream: false,
       });
