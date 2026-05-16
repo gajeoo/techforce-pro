@@ -5,17 +5,26 @@ import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 
 const rawPort = process.env.PORT;
-const rawApiPort = process.env.API_PORT ?? "8080";
 
-if (rawPort !== undefined) {
-  const port = Number(rawPort);
-
-  if (Number.isNaN(port) || port <= 0) {
-    throw new Error(`Invalid PORT value: "${rawPort}"`);
-  }
+if (!rawPort) {
+  throw new Error(
+    "PORT environment variable is required but was not provided.",
+  );
 }
 
-const basePath = process.env.BASE_PATH ?? "/";
+const port = Number(rawPort);
+
+if (Number.isNaN(port) || port <= 0) {
+  throw new Error(`Invalid PORT value: "${rawPort}"`);
+}
+
+const basePath = process.env.BASE_PATH;
+
+if (!basePath) {
+  throw new Error(
+    "BASE_PATH environment variable is required but was not provided.",
+  );
+}
 
 export default defineConfig({
   base: basePath,
@@ -44,29 +53,25 @@ export default defineConfig({
     },
     dedupe: ["react", "react-dom"],
   },
-  root: path.resolve(import.meta.dirname),
-  server: {
-    ...(rawPort !== undefined ? { port: Number(rawPort), strictPort: true } : {}),
-    host: "0.0.0.0",
-    allowedHosts: true,
-    proxy: process.env.VITE_API_URL
-      ? undefined
-      : {
-          "/api": {
-            target: `http://127.0.0.1:${rawApiPort}`,
-            changeOrigin: true,
-          },
-        },
-    fs: {
-      strict: true,
-    },
+  optimizeDeps: {
+    include: ["convex/react", "convex/server", "convex/browser"],
   },
+  root: path.resolve(import.meta.dirname),
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
   },
+  server: {
+    port,
+    strictPort: true,
+    host: "0.0.0.0",
+    allowedHosts: true,
+    fs: {
+      strict: true,
+    },
+  },
   preview: {
-    ...(rawPort !== undefined ? { port: Number(rawPort) } : {}),
+    port,
     host: "0.0.0.0",
     allowedHosts: true,
   },
