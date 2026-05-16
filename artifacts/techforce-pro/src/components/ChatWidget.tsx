@@ -1,10 +1,12 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { MessageSquare, X, Send, ChevronDown, Paperclip, Search } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import type { Doc } from "@/convex/_generated/dataModel";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
-import { getEmployees, type ApiEmployee } from "@/lib/api";
 
 interface ChatAttachment {
   name: string;
@@ -50,7 +52,6 @@ export function ChatWidget() {
   const [input, setInput] = useState("");
   const [unread, setUnread] = useState(0);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
-  const [staff, setStaff] = useState<ApiEmployee[]>([]);
   const [recipientId, setRecipientId] = useState<string>("");
   const [recipientOpen, setRecipientOpen] = useState(false);
   const [recipientSearch, setRecipientSearch] = useState("");
@@ -59,7 +60,21 @@ export function ChatWidget() {
   const searchRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Close on outside click
+  const allEmployees = (useQuery(api.employees.list) ?? []) as Doc<"employees">[];
+
+  const isManager = user?.role === "manager";
+
+  const staff = useMemo((): Doc<"employees">[] => {
+    if (isManager) return [];
+    return allEmployees.filter((e: Doc<"employees">) => e.role === "admin" || e.role === "suppression_lead");
+  }, [allEmployees, isManager]);
+
+  useEffect(() => {
+    if (!isManager && staff.length > 0 && !recipientId) {
+      setRecipientId(String(staff[0]._id));
+    }
+  }, [staff, isManager, recipientId]);
+
   useEffect(() => {
     if (!open) return;
     function handleMouseDown(e: MouseEvent) {
@@ -70,19 +85,6 @@ export function ChatWidget() {
     document.addEventListener("mousedown", handleMouseDown);
     return () => document.removeEventListener("mousedown", handleMouseDown);
   }, [open]);
-
-  const isManager = user?.role === "manager";
-
-  useEffect(() => {
-    if (!isManager) {
-      getEmployees().then(emps => {
-        // Customers see both admin (manager) and suppression_lead (supervisor)
-        const mgmt = emps.filter(e => e.role === "admin" || e.role === "suppression_lead");
-        setStaff(mgmt);
-        if (mgmt.length > 0 && !recipientId) setRecipientId(String(mgmt[0].id));
-      });
-    }
-  }, [isManager]);
 
   useEffect(() => {
     const all = loadMessages();
@@ -122,7 +124,7 @@ export function ChatWidget() {
 
   function send() {
     if ((!input.trim() && pendingAttachments.length === 0) || !user) return;
-    const recipient = staff.find(e => String(e.id) === recipientId);
+    const recipient = staff.find(e => String(e._id) === recipientId);
     const msg: ChatMessage = {
       id: `msg-${Date.now()}`,
       senderId: user.id,
@@ -132,7 +134,7 @@ export function ChatWidget() {
       attachments: pendingAttachments.length > 0 ? [...pendingAttachments] : undefined,
       timestamp: new Date().toISOString(),
       isAdmin: isManager,
-      recipientId: recipient ? String(recipient.id) : undefined,
+      recipientId: recipient ? String(recipient._id) : undefined,
     };
     const all = loadMessages();
     const updated = [...all, msg];
@@ -146,18 +148,18 @@ export function ChatWidget() {
 
   if (!user) return null;
 
-  const selectedStaff = staff.find(e => String(e.id) === recipientId);
-  const getStaffLabel = (emp: ApiEmployee) =>
-    emp.role === "admin" ? "Manager" : emp.role === "suppression_lead" ? "Supervisor" : emp.role;
+  const getStaffLabel = (role: string) =>
+    role === "admin" ? "Manager" : role === "suppression_lead" ? "Supervisor" : role;
 
+  const selectedStaff = staff.find(e => String(e._id) === recipientId);
   const recipientLabel = selectedStaff
-    ? `${selectedStaff.name} (${getStaffLabel(selectedStaff)})`
+    ? `${selectedStaff.name} (${getStaffLabel(selectedStaff.role)})`
     : "Multicorp Office";
 
   const filteredStaff = recipientSearch.trim()
     ? staff.filter(e =>
         e.name.toLowerCase().includes(recipientSearch.toLowerCase()) ||
-        getStaffLabel(e).toLowerCase().includes(recipientSearch.toLowerCase())
+        getStaffLabel(e.role).toLowerCase().includes(recipientSearch.toLowerCase())
       )
     : staff;
 
@@ -166,7 +168,6 @@ export function ChatWidget() {
       <div ref={containerRef} className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-2">
         {open && (
           <div className="w-80 bg-card border border-border rounded-2xl shadow-2xl flex flex-col overflow-hidden mb-2" style={{ maxHeight: 500 }}>
-            {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 bg-primary text-primary-foreground shrink-0">
               <div>
                 <div className="font-semibold text-sm">
@@ -181,17 +182,12 @@ export function ChatWidget() {
               </button>
             </div>
 
-            {/* Recipient selector for non-managers */}
             {!isManager && staff.length > 0 && (
               <div className="px-3 py-2 border-b border-border bg-muted/30 shrink-0">
                 <div className="relative">
                   {!recipientOpen ? (
                     <button
-                      onClick={() => {
-                        setRecipientOpen(true);
-                        setRecipientSearch("");
-                        setTimeout(() => searchRef.current?.focus(), 50);
-                      }}
+                      onClick={() => { setRecipientOpen(true); setRecipientSearch(""); setTimeout(() => searchRef.current?.focus(), 50); }}
                       className="w-full flex items-center justify-between text-xs px-2 py-1.5 rounded border border-border bg-background hover:bg-muted/50 transition-colors"
                     >
                       <span className="text-muted-foreground mr-1">To:</span>
@@ -210,9 +206,8 @@ export function ChatWidget() {
                         onKeyDown={e => {
                           if (e.key === "Escape") { setRecipientOpen(false); setRecipientSearch(""); }
                           if (e.key === "Enter" && filteredStaff.length === 1) {
-                            setRecipientId(String(filteredStaff[0].id));
-                            setRecipientOpen(false);
-                            setRecipientSearch("");
+                            setRecipientId(String(filteredStaff[0]._id));
+                            setRecipientOpen(false); setRecipientSearch("");
                           }
                         }}
                         className="w-full text-xs pl-6 pr-2 py-1.5 rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-primary"
@@ -226,16 +221,16 @@ export function ChatWidget() {
                       ) : (
                         filteredStaff.map(emp => (
                           <button
-                            key={emp.id}
-                            onClick={() => { setRecipientId(String(emp.id)); setRecipientOpen(false); setRecipientSearch(""); }}
-                            className={`w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-muted/50 transition-colors text-left ${String(emp.id) === recipientId ? "bg-primary/10 font-semibold" : ""}`}
+                            key={emp._id}
+                            onClick={() => { setRecipientId(String(emp._id)); setRecipientOpen(false); setRecipientSearch(""); }}
+                            className={`w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-muted/50 transition-colors text-left ${String(emp._id) === recipientId ? "bg-primary/10 font-semibold" : ""}`}
                           >
                             <div className="size-6 rounded-full bg-primary/10 flex items-center justify-center text-[9px] font-bold text-primary shrink-0">
                               {emp.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
                             </div>
                             <div>
                               <div className="font-medium">{emp.name}</div>
-                              <div className="text-muted-foreground text-[10px]">{getStaffLabel(emp)}</div>
+                              <div className="text-muted-foreground text-[10px]">{getStaffLabel(emp.role)}</div>
                             </div>
                           </button>
                         ))
@@ -246,7 +241,6 @@ export function ChatWidget() {
               </div>
             )}
 
-            {/* Messages */}
             <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0">
               {messages.length === 0 && (
                 <div className="text-center text-muted-foreground text-xs py-8">
@@ -283,7 +277,6 @@ export function ChatWidget() {
               <div ref={bottomRef} />
             </div>
 
-            {/* Pending attachments preview */}
             {pendingAttachments.length > 0 && (
               <div className="px-3 py-1.5 border-t border-border bg-muted/20 space-y-1 shrink-0">
                 {pendingAttachments.map((att, i) => (
@@ -299,7 +292,6 @@ export function ChatWidget() {
               </div>
             )}
 
-            {/* Input */}
             <div className="p-3 border-t border-border flex gap-2 shrink-0">
               <Input
                 value={input}
