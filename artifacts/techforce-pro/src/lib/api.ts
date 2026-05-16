@@ -280,6 +280,12 @@ export const resumeRecurringSchedule = (id: number) =>
 
 export const getOpenJobs = () => request<ApiOpenJob[]>("/open-jobs");
 
+export const createOpenJob = (body: Record<string, unknown>) =>
+  request<ApiOpenJob>("/open-jobs", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
 // ─── Utility helpers ──────────────────────────────────────────────────────────
 
 export function roleLabel(role: string): string {

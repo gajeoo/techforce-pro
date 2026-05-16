@@ -12,7 +12,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   Legend,
@@ -33,10 +33,8 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs";
-import {
-  getInvoices, getEmployees, getJobs, getReturnJobs, getRescheduleJobs,
-  type ApiInvoice, type ApiEmployee, type ApiJob,
-} from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -75,25 +73,12 @@ function initials(name: string) {
 
 export function ReportsPage() {
   const [activePeriod, setActivePeriod] = useState<"YTD" | "Q1" | "Q2" | "Q3" | "Q4">("YTD");
-  const [invoices,    setInvoices]    = useState<ApiInvoice[]>([]);
-  const [employees,   setEmployees]   = useState<ApiEmployee[]>([]);
-  const [jobs,        setJobs]        = useState<ApiJob[]>([]);
-  const [returnJobs,  setReturnJobs]  = useState<ApiJob[]>([]);
-  const [reschedJobs, setReschedJobs] = useState<ApiJob[]>([]);
-  const [loading,     setLoading]     = useState(true);
-
-  useEffect(() => {
-    Promise.all([getInvoices(), getEmployees(), getJobs(), getReturnJobs(), getRescheduleJobs()])
-      .then(([invs, emps, jbs, rets, rescs]) => {
-        setInvoices(invs);
-        setEmployees(emps);
-        setJobs(jbs);
-        setReturnJobs(rets);
-        setReschedJobs(rescs);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+  const invoices    = (useQuery(api.invoices.list)   ?? []) as any[];
+  const employees   = (useQuery(api.employees.list) ?? []) as any[];
+  const rawJobs     = (useQuery(api.jobs.list)       ?? []) as any[];
+  const jobs        = rawJobs;
+  const returnJobs  = rawJobs.filter((j: any) => j.status === "non_compliant");
+  const reschedJobs = rawJobs.filter((j: any) => j.status === "reschedule_needed");
 
   // ── Monthly P&L from real invoices ──────────────────────────────────────
   const allMonthlyData = useMemo(() => {
@@ -270,44 +255,8 @@ export function ReportsPage() {
     a.click();
   }
 
-  function downloadTechRoiCsv() {
-    const rows = [["Name", "Role", "Utilization %", "Revenue YTD", "Total Cost", "Profit", "ROI %", "Shop Days Used", "Shop Days Allowed"]];
-    techProfitability.forEach(t => rows.push([
-      t.name, t.role, String(t.utilization),
-      String(t.revenueThisMonth), String(t.monthlyCost), String(t.profit),
-      String(t.roi), String(t.shopDaysUsed), String(t.shopDaysAllowed),
-    ]));
-    const csv = rows.map(r => r.map(v => `"${v}"`).join(",")).join("\n");
-    const a = Object.assign(document.createElement("a"), {
-      href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })),
-      download: "tech-roi-report.csv",
-    });
-    a.click();
-  }
-
-  function downloadJobsCsv() {
-    const rows = [["Job ID", "Customer", "Service", "Status", "Tech", "Scheduled Date", "Revenue", "Priority"]];
-    jobs.forEach(j => rows.push([
-      String(j.id), j.customerName, j.serviceType, j.status,
-      j.employeeName ?? "Unassigned", j.scheduledDate ?? "TBD",
-      String(j.revenue), j.priority,
-    ]));
-    const csv = rows.map(r => r.map(v => `"${v}"`).join(",")).join("\n");
-    const a = Object.assign(document.createElement("a"), {
-      href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })),
-      download: "jobs-report.csv",
-    });
-    a.click();
-  }
-
   // ── Loading state ───────────────────────────────────────────────────────
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20 text-muted-foreground text-sm">
-        Loading reports…
-      </div>
-    );
-  }
+  // data false handled by Convex
 
   return (
     <div className="space-y-6">
@@ -332,16 +281,10 @@ export function ReportsPage() {
             ))}
           </div>
           <Button variant="outline" size="sm" className="gap-1.5" onClick={downloadRevenueCsv}>
-            <FileSpreadsheet className="size-3.5" /> Revenue CSV
+            <FileSpreadsheet className="size-3.5" /> Export CSV
           </Button>
-          <Button variant="outline" size="sm" className="gap-1.5" onClick={downloadAgingCsv}>
-            <FileSpreadsheet className="size-3.5" /> Aging CSV
-          </Button>
-          <Button variant="outline" size="sm" className="gap-1.5" onClick={downloadTechRoiCsv}>
-            <FileSpreadsheet className="size-3.5" /> Tech ROI CSV
-          </Button>
-          <Button variant="outline" size="sm" className="gap-1.5" onClick={downloadJobsCsv}>
-            <FileSpreadsheet className="size-3.5" /> Jobs CSV
+          <Button variant="outline" size="sm" className="gap-1.5">
+            <Mail className="size-3.5" /> Schedule
           </Button>
         </div>
       </div>
@@ -472,9 +415,10 @@ export function ReportsPage() {
                       <div key={name} className="flex items-center gap-3">
                         <div className="w-32 text-xs font-medium truncate">{name}</div>
                         <div className="flex-1 bg-muted/40 rounded-full h-3 overflow-hidden">
-                          <svg viewBox="0 0 100 12" className="w-full h-full" preserveAspectRatio="none">
-                            <rect x={0} y={0} width={(rev / sorted[0][1]) * 100} height={12} fill="#22c55e" rx={6} ry={6} />
-                          </svg>
+                          <div
+                            className="h-full bg-emerald-500 rounded-full"
+                            style={{ width: `${(rev / sorted[0][1]) * 100}%` }}
+                          />
                         </div>
                         <div className="text-xs font-bold text-emerald-600 w-16 text-right">{fmt(rev)}</div>
                       </div>
@@ -508,18 +452,8 @@ export function ReportsPage() {
                     return (
                       <div key={emp.id} className="flex-1 flex flex-col items-center gap-1">
                         <span className="text-xs font-bold">{emp.shopDaysUsedYtd}</span>
-                        <div className="w-full h-full rounded-t-lg overflow-hidden bg-muted/20">
-                          <svg viewBox="0 0 100 100" className="w-full h-full" preserveAspectRatio="none">
-                            <rect
-                              x={0}
-                              y={100 - Math.max(pct, 5)}
-                              width={100}
-                              height={Math.max(pct, 5)}
-                              fill={isLow ? "#22c55e" : "#ef4444"}
-                              rx={8}
-                              ry={8}
-                            />
-                          </svg>
+                        <div className="w-full rounded-t-lg" style={{ height: `${Math.max(pct, 5)}%` }}>
+                          <div className={`w-full h-full rounded-t-lg ${isLow ? "bg-emerald-500" : "bg-red-500"}`} />
                         </div>
                         <span className="text-[10px] text-muted-foreground truncate w-full text-center">{emp.name.split(" ")[0]}</span>
                       </div>
@@ -542,11 +476,6 @@ export function ReportsPage() {
                   const billDays = Math.round(22 * util / 100);
                   const shopDays = Math.min(emp.shopDaysUsedYtd, 22);
                   const trainDays = Math.max(0, 22 - billDays - shopDays);
-                  const billPct = (billDays / 22) * 100;
-                  const shopPct = (shopDays / 22) * 100;
-                  const trainPct = (trainDays / 22) * 100;
-                  const shopStart = billPct;
-                  const trainStart = billPct + shopPct;
                   return (
                     <div key={emp.id}>
                       <div className="flex items-center justify-between text-xs mb-1.5">
@@ -560,12 +489,10 @@ export function ReportsPage() {
                           </span>
                         </div>
                       </div>
-                      <div className="h-3 rounded-full overflow-hidden bg-muted/50" role="img" aria-label="Billable, shop, and training days split">
-                        <svg viewBox="0 0 100 12" className="w-full h-full" preserveAspectRatio="none">
-                          <rect x={0} y={0} width={billPct} height={12} fill="#22c55e" />
-                          <rect x={shopStart} y={0} width={shopPct} height={12} fill="#ef4444" />
-                          {trainDays > 0 && <rect x={trainStart} y={0} width={trainPct} height={12} fill="#f59e0b" />}
-                        </svg>
+                      <div className="flex h-3 rounded-full overflow-hidden bg-muted/50">
+                        <div className="bg-emerald-500" style={{ width: `${(billDays / 22) * 100}%` }} />
+                        <div className="bg-red-500"    style={{ width: `${(shopDays / 22) * 100}%` }} />
+                        {trainDays > 0 && <div className="bg-amber-500" style={{ width: `${(trainDays / 22) * 100}%` }} />}
                       </div>
                     </div>
                   );

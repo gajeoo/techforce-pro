@@ -51,6 +51,8 @@ import {
   DataManagementPage,
   PayrollPage,
   TaxPage,
+  AdvancedAnalyticsPage,
+  NotificationsPage,
 } from "./pages";
 import { AIAssistant } from "./components/AIAssistant";
 
@@ -134,7 +136,9 @@ function App() {
               <Route path="/pricing"          element={<ManagerOnly><PricingPage /></ManagerOnly>} />
 
               {/* Admin */}
-              <Route path="/analytics"  element={<ManagerOnly><AnalyticsPage /></ManagerOnly>} />
+              <Route path="/analytics"           element={<ManagerOnly><AnalyticsPage /></ManagerOnly>} />
+              <Route path="/advanced-analytics" element={<ManagerOnly><AdvancedAnalyticsPage /></ManagerOnly>} />
+              <Route path="/notifications"      element={<NotificationsPage />} />
               <Route path="/invites"    element={<NotTech><InvitesPage /></NotTech>} />
               <Route path="/enquiries"  element={<NotTech><EnquiriesPage /></NotTech>} />
 

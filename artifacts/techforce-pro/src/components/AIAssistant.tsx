@@ -66,17 +66,10 @@ export function AIAssistant() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
-  const [convId, setConvId] = useState<number | null>(null);
   const [showQuickPrompts, setShowQuickPrompts] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (open && !convId) {
-      initConversation();
-    }
-  }, [open]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -100,61 +93,28 @@ export function AIAssistant() {
     return () => document.removeEventListener("mousedown", handleMouseDown);
   }, [open]);
 
-  async function initConversation() {
-    try {
-      const r = await fetch(`${API}/openai/conversations`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: `TechForce AI Session — ${new Date().toLocaleString()}` }),
-      });
-      if (r.ok) {
-        const conv = await r.json();
-        setConvId(conv.id);
-      }
-    } catch { /* silent */ }
-  }
-
   async function sendMessage(text: string) {
     if (!text.trim() || loading) return;
 
-    // If no convId yet, try to create one first
-    let activeConvId = convId;
-    if (!activeConvId) {
-      try {
-        const r = await fetch(`${API}/openai/conversations`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: `TechForce AI Session — ${new Date().toLocaleString()}` }),
-        });
-        if (r.ok) {
-          const conv = await r.json();
-          activeConvId = conv.id;
-          setConvId(conv.id);
-        } else {
-          setMessages(prev => [...prev, { role: "assistant", content: "Unable to connect to AI. Please try again.", id: crypto.randomUUID() }]);
-          return;
-        }
-      } catch {
-        setMessages(prev => [...prev, { role: "assistant", content: "Unable to connect to AI. Please try again.", id: crypto.randomUUID() }]);
-        return;
-      }
-    }
-
     const userMsg: Message = { role: "user", content: text.trim(), id: crypto.randomUUID() };
-    setMessages(prev => [...prev, userMsg]);
+    const nextMessages = [...messages, userMsg];
+
+    setMessages(nextMessages);
     setInput("");
     setLoading(true);
     setStreamingContent("");
     setShowQuickPrompts(false);
 
     try {
-      const res = await fetch(`${API}/openai/conversations/${activeConvId}/messages`, {
+      const res = await fetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: text.trim() }),
+        body: JSON.stringify({
+          messages: nextMessages.map(m => ({ role: m.role, content: m.content })),
+        }),
       });
 
-      if (!res.body) throw new Error("No body");
+      if (!res.body) throw new Error("No response body");
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -195,9 +155,7 @@ export function AIAssistant() {
   function resetConversation() {
     setMessages([]);
     setStreamingContent("");
-    setConvId(null);
     setShowQuickPrompts(true);
-    initConversation();
   }
 
   if (!open) {
@@ -234,15 +192,27 @@ export function AIAssistant() {
           <Badge className="bg-emerald-500 text-[9px] px-1.5 py-0.5 ml-1">LIVE</Badge>
         </div>
         <div className="flex items-center gap-1">
-          {!minimized && (
-            <button onClick={resetConversation} title="New conversation" className="p-1.5 rounded-lg hover:bg-primary-foreground/20 transition-colors">
+          {!minimized && messages.length > 0 && (
+            <button
+              onClick={resetConversation}
+              className="p-1.5 rounded-lg hover:bg-primary-foreground/10 transition-colors"
+              title="New conversation"
+            >
               <RotateCcw className="size-3.5" />
             </button>
           )}
-          <button onClick={() => setMinimized(m => !m)} className="p-1.5 rounded-lg hover:bg-primary-foreground/20 transition-colors">
+          <button
+            onClick={() => setMinimized(v => !v)}
+            className="p-1.5 rounded-lg hover:bg-primary-foreground/10 transition-colors"
+            title={minimized ? "Expand" : "Minimize"}
+          >
             {minimized ? <Maximize2 className="size-3.5" /> : <Minimize2 className="size-3.5" />}
           </button>
-          <button onClick={() => setOpen(false)} className="p-1.5 rounded-lg hover:bg-primary-foreground/20 transition-colors">
+          <button
+            onClick={() => setOpen(false)}
+            className="p-1.5 rounded-lg hover:bg-primary-foreground/10 transition-colors"
+            title="Close"
+          >
             <X className="size-3.5" />
           </button>
         </div>
@@ -251,91 +221,78 @@ export function AIAssistant() {
       {!minimized && (
         <>
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-1 min-h-0">
-            {messages.length === 0 && !loading && (
-              <div className="text-center py-4">
-                <div className="size-14 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-3">
-                  <Sparkles className="size-7 text-primary" />
+          <div className="flex-1 overflow-y-auto p-4 min-h-0">
+            {messages.length === 0 && showQuickPrompts && (
+              <div className="space-y-3">
+                <div className="flex items-start gap-2 mb-4">
+                  <div className="size-7 rounded-full bg-primary/10 flex items-center justify-center mr-1 shrink-0 mt-0.5">
+                    <Bot className="size-4 text-primary" />
+                  </div>
+                  <div className="bg-muted rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-sm leading-relaxed">
+                    Hi! I'm TechForce AI. I can help with scheduling, jobs, customers, and more. What would you like to do?
+                  </div>
                 </div>
-                <p className="font-semibold text-sm text-foreground">Hi! I'm TechForce AI</p>
-                <p className="text-xs text-muted-foreground mt-1 leading-relaxed max-w-[260px] mx-auto">
-                  I know your customers, their locations, jobs, schedules, and more. Ask me anything or give me a command.
-                </p>
+                <p className="text-[10px] text-muted-foreground font-semibold uppercase tracking-wide px-1">Quick prompts</p>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {QUICK_PROMPTS.map(p => (
+                    <button
+                      key={p}
+                      onClick={() => sendMessage(p)}
+                      className="text-left text-xs px-3 py-2 rounded-xl border border-border hover:bg-muted hover:border-primary/30 transition-colors text-foreground/80 hover:text-foreground"
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 
             {messages.map(msg => <MsgBubble key={msg.id} msg={msg} />)}
 
-            {loading && streamingContent === "" && (
+            {loading && (
               <div className="flex justify-start mb-3">
                 <div className="size-7 rounded-full bg-primary/10 flex items-center justify-center mr-2 shrink-0 mt-0.5">
                   <Bot className="size-4 text-primary" />
                 </div>
-                <div className="bg-muted rounded-2xl rounded-tl-sm px-3.5 py-2.5">
-                  <TypingDots />
-                </div>
-              </div>
-            )}
-
-            {streamingContent && (
-              <div className="flex justify-start mb-3">
-                <div className="size-7 rounded-full bg-primary/10 flex items-center justify-center mr-2 shrink-0 mt-0.5">
-                  <Bot className="size-4 text-primary" />
-                </div>
-                <div className="max-w-[85%] bg-muted rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap">
-                  {streamingContent}
-                  <span className="inline-block w-0.5 h-3.5 bg-foreground/60 ml-0.5 animate-pulse rounded" />
-                </div>
+                {streamingContent ? (
+                  <div className="max-w-[85%] rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-sm leading-relaxed bg-muted whitespace-pre-wrap">
+                    {streamingContent}
+                  </div>
+                ) : (
+                  <div className="bg-muted rounded-2xl rounded-tl-sm px-3.5 py-2.5">
+                    <TypingDots />
+                  </div>
+                )}
               </div>
             )}
 
             <div ref={bottomRef} />
           </div>
 
-          {/* Quick prompts */}
-          {showQuickPrompts && messages.length === 0 && (
-            <div className="px-4 pb-2 shrink-0">
-              <div className="flex items-center gap-1 mb-2 text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
-                <Sparkles className="size-3" /> Quick Actions
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {QUICK_PROMPTS.map(p => (
-                  <button
-                    key={p}
-                    onClick={() => sendMessage(p)}
-                    className="text-[11px] px-2.5 py-1 rounded-full border border-border bg-muted/50 hover:bg-primary/10 hover:border-primary/40 hover:text-primary transition-colors text-left leading-tight"
-                  >
-                    {p}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* Input */}
-          <div className="p-3 border-t flex gap-2 items-end shrink-0">
-            <Input
-              ref={inputRef}
-              placeholder="Ask about customers, locations, jobs…"
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  sendMessage(input);
-                }
-              }}
-              disabled={loading}
-              className="text-sm flex-1 rounded-xl border-border focus-visible:ring-primary/40"
-            />
-            <Button
-              size="icon"
-              className="size-9 rounded-xl shrink-0"
-              onClick={() => sendMessage(input)}
-              disabled={!input.trim() || loading}
-            >
-              <Send className="size-4" />
-            </Button>
+          <div className="p-3 border-t shrink-0">
+            <div className="flex gap-2 items-center">
+              <Input
+                ref={inputRef}
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(input); } }}
+                placeholder="Ask anything…"
+                className="flex-1 text-sm h-9 rounded-xl"
+                disabled={loading}
+              />
+              <Button
+                size="sm"
+                className="h-9 w-9 p-0 rounded-xl shrink-0"
+                onClick={() => sendMessage(input)}
+                disabled={loading || !input.trim()}
+              >
+                <Send className="size-3.5" />
+              </Button>
+            </div>
+            <p className="text-[10px] text-muted-foreground text-center mt-2">
+              TechForce AI · Powered by GPT-4o
+            </p>
           </div>
         </>
       )}

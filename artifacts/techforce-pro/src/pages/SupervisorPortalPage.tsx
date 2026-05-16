@@ -1,3 +1,4 @@
+import { initials, serviceTypeLabel } from "@/lib/utils";
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -47,7 +48,10 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { getEmployees, getJobs, initials, serviceTypeLabel, type ApiEmployee, type ApiJob } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import type { ConvexEmployee, ConvexJob, ConvexTimeOff } from "@/lib/convex-types";
+
 import { useAuth } from "@/contexts/AuthContext";
 import { LicenseAlertBanner } from "@/components/LicenseAlertBanner";
 import { seedClockHistoryIfNeeded, addClockEntry, getLastClockEntry } from "@/lib/clockHistory";
@@ -80,29 +84,23 @@ const operationalAlerts = [
 // ─── Component ────────────────────────────────────────────────────────────
 
 export function SupervisorPortalPage() {
+  const employees = (useQuery(api.employees.list) ?? []) as ConvexEmployee[];
+  const jobs      = (useQuery(api.jobs.list)       ?? []) as ConvexJob[];
+  const timeoffs  = (useQuery(api.timeoff.list)    ?? []) as ConvexTimeOff[];
+  const today     = new Date().toISOString().slice(0, 10);
+  const todayOff  = timeoffs.filter(t => t.status === "approved" && (t.requestedDate ?? "") <= today && (t.endDate ?? today) >= today);
+
   const navigate = useNavigate();
 
-  const [employees, setEmployees] = useState<ApiEmployee[]>([]);
-  const [jobs, setJobs] = useState<ApiJob[]>([]);
-  const [todayOff, setTodayOff] = useState<{ id: number; employeeName: string; type: string; startDate: string; endDate: string }[]>([]);
-  const [pendingCount, setPendingCount] = useState(0);
+  const pendingCount: number = timeoffs.filter(t => t.status === "pending").length;
 
-  useEffect(() => {
-    getEmployees().then(setEmployees).catch(() => {});
-    getJobs().then(setJobs).catch(() => {});
-    const today = new Date().toISOString().slice(0, 10);
-    fetch(`/api/time-off?status=approved&date=${today}`)
-      .then(r => r.ok ? r.json() : []).then(setTodayOff).catch(() => {});
-    fetch("/api/time-off?status=pending")
-      .then(r => r.ok ? r.json() : []).then((d: unknown[]) => setPendingCount(d.length)).catch(() => {});
-  }, []);
 
   // Read live data on render
   const liveStatuses = readLiveStatuses();
 
   // Derive live tech tracker from real employees + jobs + localStorage
   const liveTechData = employees.map((emp, idx) => {
-    const myJobs = jobs.filter(j => j.employeeId === emp.id);
+    const myJobs = jobs.filter(j => String(j.employeeId) === String(emp._id ?? emp.id));
     const completedJobs = myJobs.filter(j => (liveStatuses[String(j.id)] ?? j.status) === "completed");
 
     // Find the most-progressed active job
@@ -132,8 +130,8 @@ export function SupervisorPortalPage() {
       : allDone ? "Done for day" : "Standby";
 
     return {
-      id: String(emp.id),
-      name: emp.name.split(" ").map((n, i) => i === 0 ? n : n[0] + ".").join(" "),
+      id: String(emp._id ?? emp.id),
+      name: emp.name.split(" ").map((n: string, i: number) => i === 0 ? n : n[0] + ".").join(" "),
       fullName: emp.name,
       avatar: initials(emp.name),
       status: techStatus,
@@ -164,12 +162,6 @@ export function SupervisorPortalPage() {
   // Supervisor's own appointments
   interface SupApt { id: number; title: string; date: string; startTime: string; endTime: string | null; type: string; location: string | null; }
   const [supApts, setSupApts] = useState<SupApt[]>([]);
-  useEffect(() => {
-    fetch("/api/appointments?owner=supervisor")
-      .then(r => r.ok ? r.json() : [])
-      .then(setSupApts)
-      .catch(() => {});
-  }, []);
 
   const todayApts = supApts.filter(a => a.date === new Date().toISOString().slice(0, 10))
     .sort((a, b) => a.startTime.localeCompare(b.startTime));
@@ -600,7 +592,7 @@ export function SupervisorPortalPage() {
               <span className="text-sm font-bold text-amber-700 dark:text-amber-400">Operational Alerts</span>
             </div>
             <div className="space-y-2">
-              {operationalAlerts.map((alert, i) => (
+              {operationalAlerts.map((alert, i: number) => (
                 <div
                   key={i}
                   className="flex items-center justify-between py-2 border-b border-amber-200/50 last:border-0 cursor-pointer hover:bg-amber-100/30 rounded px-2 -mx-2 transition-colors"
@@ -675,7 +667,7 @@ export function SupervisorPortalPage() {
                   <SelectTrigger><SelectValue placeholder="Current tech" /></SelectTrigger>
                   <SelectContent>
                     {employees.map(e => (
-                      <SelectItem key={String(e.id)} value={String(e.id)}>{e.name}</SelectItem>
+                      <SelectItem key={String(e._id ?? e.id)} value={String(e._id ?? e.id)}>{e.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -686,7 +678,7 @@ export function SupervisorPortalPage() {
                   <SelectTrigger><SelectValue placeholder="Assign to..." /></SelectTrigger>
                   <SelectContent>
                     {employees.map(e => (
-                      <SelectItem key={String(e.id)} value={String(e.id)}>{e.name}</SelectItem>
+                      <SelectItem key={String(e._id ?? e.id)} value={String(e._id ?? e.id)}>{e.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -723,7 +715,7 @@ export function SupervisorPortalPage() {
                 <SelectTrigger><SelectValue placeholder="Select customer" /></SelectTrigger>
                 <SelectContent>
                   {employees.map(e => (
-                    <SelectItem key={String(e.id)} value={String(e.id)}>
+                    <SelectItem key={String(e._id ?? e.id)} value={String(e._id ?? e.id)}>
                       {e.name} — {e.certifications.join(", ") || "General"}
                     </SelectItem>
                   ))}
@@ -750,7 +742,7 @@ export function SupervisorPortalPage() {
                   <SelectContent>
                     <SelectItem value="auto">Auto — Nearest Available</SelectItem>
                     {employees.map(e => (
-                      <SelectItem key={String(e.id)} value={String(e.id)}>{e.name}</SelectItem>
+                      <SelectItem key={String(e._id ?? e.id)} value={String(e._id ?? e.id)}>{e.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>

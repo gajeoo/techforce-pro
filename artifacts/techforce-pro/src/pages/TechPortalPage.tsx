@@ -1,5 +1,7 @@
-import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";import {
+import { initials, serviceTypeLabel } from "@/lib/utils";
+import { useState, useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import {
   CalendarOff,
   Camera,
   Check,
@@ -33,7 +35,9 @@ import {
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-import { getJobs, getOpenJobs, getEmployees, initials, serviceTypeLabel, type ApiJob, type ApiEmployee, type ApiOpenJob } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+
 import { useAuth } from "@/contexts/AuthContext";
 import { LicenseAlertBanner } from "@/components/LicenseAlertBanner";
 import {
@@ -41,6 +45,7 @@ import {
   addClockEntry,
   getLastClockEntry,
 } from "@/lib/clockHistory";
+import type { ConvexEmployee, ConvexJob, ConvexOpenJob, ConvexTimeOff, TechJob } from "@/lib/convex-types";
 
 // ─── Status types & persistence ─────────────────────────────────────────
 
@@ -118,33 +123,110 @@ function getStatusStripColor(status: TechStatus) {
   return map[status];
 }
 
-// ─── Synthesize ApiJob from ApiOpenJob ───────────────────────────────────
+// ─── Synthesize open-job record ──────────────────────────────────
 
-function openJobToApiJob(oj: ApiOpenJob, empId: number): ApiJob {
+function openJobToRecord(oj: ConvexOpenJob, empId: string): TechJob & { _isOpenJob: true } {
   return {
-    id: -(oj.id),            // negative IDs for open jobs to avoid collision
-    customerId: 0,
+    _id: `open-${String(oj._id)}`,
+    _isOpenJob: true as const,
     employeeId: empId,
     serviceType: oj.certRequired ?? "inspection",
     status: "pending",
     priority: oj.priority,
     scheduledDate: null,
     scheduledTime: null,
-    revenue: 0,
-    quantity: 1,
     notes: oj.notes,
-    requiresFollowUp: false,
-    followUpConfirmed: false,
-    certificationRequired: oj.certRequired,
-    locationId: null,
-    locationName: null,
-    dueDate: null,
     customerName: oj.clientName,
-    customerAddress: "See job details",
-    employeeName: null,
-    nonComplianceReason: null,
-    nonComplianceNotifiedAt: null,
+    customerAddress: oj.clientAddress ?? "See job details",
   };
+}
+
+// ─── Job Card ────────────────────────────────────────────────────────────────
+
+function JobCard({
+  job, idx, statuses, navigate, advanceStatus, openJobs,
+}: {
+  job: TechJob;
+  idx: number;
+  statuses: Record<string, TechStatus>;
+  navigate: (path: string) => void;
+  advanceStatus: (job: TechJob) => void;
+  openJobs: ConvexOpenJob[];
+}) {
+  const isOpenJob = job._isOpenJob === true;
+  const status    = statuses[job._id] ?? jobStatusToTechStatus(job.status);
+  const nextLabel = getNextLabel(status);
+  return (
+    <Card
+      className={`overflow-hidden transition-all ${isOpenJob ? "ring-1 ring-primary/30" : ""} ${status === "completed" ? "opacity-70" : "hover:shadow-md cursor-pointer"}`}
+      onClick={() => !isOpenJob && navigate(`/jobs/${job._id}`)}
+    >
+      <div className={`h-1.5 ${getStatusStripColor(status)}`} />
+      <CardContent className="p-4">
+        <div className="flex items-start gap-4">
+          <div className="flex flex-col items-center gap-1 shrink-0">
+            <div className="text-xs font-bold text-muted-foreground">{idx + 1}</div>
+            {getStatusIcon(status)}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-semibold text-sm truncate">
+                  {job.customerName}
+                  {isOpenJob && <Badge className="ml-2 text-[9px] bg-primary/20 text-primary border-0">Newly Assigned</Badge>}
+                </div>
+                <div className="text-xs text-muted-foreground mt-0.5">{serviceTypeLabel(job.serviceType)}</div>
+              </div>
+              <Badge className={`text-[9px] shrink-0 ${getStatusBg(status)}`}>{status.replace("-", " ")}</Badge>
+            </div>
+            {job.scheduledDate && (
+              <div className="flex items-center gap-1.5 mt-1.5 text-xs text-muted-foreground">
+                <ClipboardList className="size-3 shrink-0" />
+                <span>{job.scheduledDate}{job.scheduledTime ? ` · ${job.scheduledTime}` : ""}</span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground">
+              <MapPin className="size-3 shrink-0" />
+              <span className="truncate">{job.customerAddress}</span>
+            </div>
+            {isOpenJob && (() => {
+              const oj = openJobs.find((o: ConvexOpenJob) => `open-${String(o._id)}` === job._id);
+              const coNames: string[] = oj?.coTechnicianNames ?? [];
+              return coNames.length > 0 ? (
+                <div className="flex items-center gap-1.5 mt-1 text-xs text-primary">
+                  <UserRound className="size-3 shrink-0" />
+                  <span>Working with: {coNames.join(", ")}</span>
+                </div>
+              ) : null;
+            })()}
+            {job.notes && (
+              <div className="mt-2 text-[11px] text-muted-foreground italic bg-muted/40 rounded px-2 py-1">{job.notes}</div>
+            )}
+          </div>
+        </div>
+        {status !== "completed" && nextLabel && (
+          <div className="flex gap-2 mt-3 pt-3 border-t">
+            <Button size="sm" className="flex-1 gap-1.5 h-8" onClick={e => { e.stopPropagation(); advanceStatus(job); }}>
+              <Check className="size-3.5" /> {nextLabel}
+            </Button>
+            <Button size="sm" variant="outline" className="gap-1.5 h-8 px-3" onClick={e => { e.stopPropagation(); navigate("/messages"); }}>
+              <MessageSquare className="size-3.5" />
+            </Button>
+            {!isOpenJob && (
+              <Button size="sm" variant="outline" className="gap-1.5 h-8 px-3" onClick={e => { e.stopPropagation(); navigate(`/jobs/${job._id}`); }}>
+                <ChevronRight className="size-3.5" />
+              </Button>
+            )}
+          </div>
+        )}
+        {status === "completed" && (
+          <div className="flex items-center gap-1.5 mt-3 pt-3 border-t text-xs text-emerald-600 font-medium">
+            <CheckCircle2 className="size-3.5" /> Completed
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -153,45 +235,52 @@ export function TechPortalPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [employees, setEmployees] = useState<ApiEmployee[]>([]);
-  const [jobs,      setJobs]      = useState<ApiJob[]>([]);
-  const [openJobs,  setOpenJobs]  = useState<ApiOpenJob[]>([]);
-  const [todayOff, setTodayOff]   = useState<{ id: number; employeeName: string; type: string }[]>([]);
+  const employees = (useQuery(api.employees.list)  ?? []) as ConvexEmployee[];
+  const jobs      = (useQuery(api.jobs.list, {})   ?? []) as ConvexJob[];
+  const openJobs  = (useQuery(api.openJobs.list)   ?? []) as ConvexOpenJob[];
+  const timeoffs  = (useQuery(api.timeoff.list)    ?? []) as ConvexTimeOff[];
+  const today     = new Date().toISOString().slice(0, 10);
+  const todayOff  = timeoffs.filter(t => t.status === "approved" && t.startDate <= today && t.endDate >= today);
 
-  useEffect(() => {
-    getEmployees().then(setEmployees).catch(() => {});
-    getJobs().then(setJobs).catch(() => {});
-    getOpenJobs().then(setOpenJobs).catch(() => {});
-    const today = new Date().toISOString().slice(0, 10);
-    fetch(`/api/time-off?status=approved&date=${today}`)
-      .then(r => r.ok ? r.json() : []).then(setTodayOff).catch(() => {});
-  }, []);
+  // Match by name (user.name entered at login) so the tech portal shows the
+  // correct person regardless of how auth IDs are stored.
+  const currentTech = useMemo((): ConvexEmployee | null => {
+    if (!employees.length) return null;
+    const byName = user?.name
+      ? employees.find(e => e.name.toLowerCase() === user.name!.toLowerCase())
+      : null;
+    if (byName) return byName;
+    // Fallback: first employee whose role is a tech role
+    const techRoles = ["suppression_lead", "extinguisher_tech", "sprinkler_tech", "helper"];
+    return employees.find(e => techRoles.includes(e.role)) ?? employees[0];
+  }, [employees, user?.name]);
 
-  const currentTech = employees.find(e => String(e.id) === user?.id) ?? employees[0];
-
-  // Filter regular jobs assigned to this tech
-  const regularJobs: ApiJob[] = (() => {
+  // All regular jobs assigned to this tech — past, present, and future.
+  const regularJobs = useMemo((): TechJob[] => {
     if (!currentTech) return [];
-    const filtered = jobs.filter(j => j.employeeId === currentTech.id);
-    return filtered;
-  })();
+    return jobs.filter(j => String(j.employeeId) === String(currentTech._id));
+  }, [jobs, currentTech]);
 
-  // Use API-based open job assignments (assignedEmployeeId is set by the API)
-  const assignedOpenJobs: ApiJob[] = currentTech
-    ? openJobs
-        .filter(oj => oj.assignedEmployeeId === currentTech.id)
-        .map(oj => openJobToApiJob(oj, currentTech.id))
-    : [];
+  // Open jobs assigned to this tech via the AI scheduler.
+  const assignedOpenJobs = useMemo((): TechJob[] => {
+    if (!currentTech) return [];
+    return openJobs
+      .filter(oj => String(oj.assignedEmployeeId) === String(currentTech._id))
+      .map(oj => openJobToRecord(oj, String(currentTech._id)));
+  }, [openJobs, currentTech]);
 
-  // Combine regular jobs + assigned open jobs; fallback to first 4 jobs if none
-  const myJobs: ApiJob[] = (() => {
-    const combined = [...regularJobs, ...assignedOpenJobs];
-    if (combined.length > 0) return combined;
-    // Fallback: show first few jobs so the tech portal isn't empty in demo
-    return jobs.slice(0, 4);
-  })();
+  const myJobs = useMemo(
+    (): TechJob[] => [...regularJobs, ...assignedOpenJobs],
+    [regularJobs, assignedOpenJobs],
+  );
 
-  // Status state backed by localStorage (keys are String(job.id))
+  // Split into past / today / upcoming for the timeline view.
+  const pastJobs     = useMemo(() => myJobs.filter(j => j.scheduledDate && j.scheduledDate < today), [myJobs, today]);
+  const todayJobs    = useMemo(() => myJobs.filter(j => j.scheduledDate === today || (!j.scheduledDate && !j._isOpenJob)), [myJobs, today]);
+  const upcomingJobs = useMemo(() => myJobs.filter(j => j.scheduledDate && j.scheduledDate > today), [myJobs, today]);
+  const openJobCards = useMemo(() => myJobs.filter(j => j._isOpenJob), [myJobs]);
+
+  // Status state backed by localStorage (keys are job._id strings)
   const [statuses, setStatuses] = useState<Record<string, TechStatus>>(loadStatuses);
 
   const [clockLocation] = useState("39.2156° N, 76.8585° W — Shop, Columbia MD");
@@ -209,53 +298,14 @@ export function TechPortalPage() {
     }
     return "—";
   });
-
-  // Live digital clock
-  const [liveTime, setLiveTime] = useState(() =>
-    new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" }),
-  );
-  useEffect(() => {
-    const t = setInterval(
-      () => setLiveTime(new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" })),
-      1000,
-    );
-    return () => clearInterval(t);
-  }, []);
-
-  const [completingJob, setCompletingJob] = useState<ApiJob | null>(null);
+  const [completingJob, setCompletingJob] = useState<TechJob | null>(null);
   const [completeOpen, setCompleteOpen] = useState(false);
 
   // Completion form state
   const [compNotes, setCompNotes] = useState("");
   const [compDeficiencies, setCompDeficiencies] = useState("");
-  const [compChecklist, setCompChecklist] = useState<Record<string, boolean>>({});
 
-  const completedCount = myJobs.filter(j => (statuses[String(j.id)] ?? jobStatusToTechStatus(j.status)) === "completed").length;
-
-  // Service-specific completion checklists
-  function getChecklist(serviceType: string): string[] {
-    const base = [
-      "Customer site confirmed and accessible",
-      "PPE / safety equipment worn",
-      "Work completed per service order",
-      "Area cleaned and secured",
-      "Customer or site rep notified",
-    ];
-    const extra: Record<string, string[]> = {
-      hood_suppression:        ["Nozzle coverage verified", "System pressure within spec", "Grease build-up noted", "Ansul tag affixed"],
-      suppression:             ["Nozzle coverage verified", "System pressure within spec", "Ansul tag affixed"],
-      extinguisher_inspection: ["Agent weight/pressure confirmed", "Pin & tamper seal intact", "Service tag updated", "Mounted securely"],
-      extinguisher:            ["Agent weight/pressure confirmed", "Pin & tamper seal intact", "Service tag updated"],
-      sprinkler_test:          ["Flow test completed", "Inspector's test valve closed", "Gauges read correctly", "No leaks observed"],
-      sprinkler:               ["Flow test completed", "Inspector's test valve closed", "No leaks observed"],
-      fire_alarm:              ["All initiating devices tested", "Notification appliances verified", "Panel in normal condition", "UL cert attached"],
-      fire_alarm_test:         ["All initiating devices tested", "Notification appliances verified", "Panel in normal condition"],
-      backflow_test:           ["Test cocks opened/closed per procedure", "Pressure differential recorded", "Test report completed"],
-      exit_light_check:        ["All exit signs illuminated", "Battery backup tested", "Emergency lights functional"],
-      standpipe_test:          ["Hose connections tested", "Pressure at roof outlet verified", "Flow test completed"],
-    };
-    return [...base, ...(extra[serviceType] ?? [])];
-  }
+  const completedCount = myJobs.filter(j => (statuses[j._id] ?? jobStatusToTechStatus(j.status)) === "completed").length;
 
   function updateStatus(jobId: string, next: TechStatus) {
     const updated = { ...statuses, [jobId]: next };
@@ -263,8 +313,8 @@ export function TechPortalPage() {
     saveStatuses(updated);
   }
 
-  function advanceStatus(job: ApiJob) {
-    const current = statuses[String(job.id)] ?? jobStatusToTechStatus(job.status);
+  function advanceStatus(job: TechJob) {
+    const current = statuses[job._id] ?? jobStatusToTechStatus(job.status);
     const idx = STATUS_ORDER.indexOf(current);
     if (idx >= STATUS_ORDER.length - 1) return;
     const next = STATUS_ORDER[idx + 1];
@@ -272,18 +322,15 @@ export function TechPortalPage() {
       setCompletingJob(job);
       setCompNotes("");
       setCompDeficiencies("");
-      // Initialize checklist — all unchecked
-      const items = getChecklist(job.serviceType);
-      setCompChecklist(Object.fromEntries(items.map(i => [i, false])));
       setCompleteOpen(true);
       return;
     }
-    updateStatus(String(job.id), next);
+    updateStatus(job._id, next);
   }
 
   function confirmComplete() {
     if (!completingJob) return;
-    updateStatus(String(completingJob.id), "completed");
+    updateStatus(completingJob._id, "completed");
     setCompletingJob(null);
     setCompleteOpen(false);
   }
@@ -345,9 +392,8 @@ export function TechPortalPage() {
               <div className={`size-3 rounded-full ${clockedIn ? "bg-emerald-500 animate-pulse" : "bg-gray-400"}`} />
               <span className="text-sm font-bold">{clockedIn ? `In since ${clockTime}` : "Clocked Out"}</span>
             </div>
-            <div className="text-base font-mono font-bold tabular-nums text-primary mt-1">{liveTime}</div>
             {clockedIn && (
-              <div className="text-[10px] text-muted-foreground mt-0.5 flex items-center gap-1">
+              <div className="text-[10px] text-muted-foreground mt-1 flex items-center gap-1">
                 <MapPin className="size-2.5" /> {clockLocation}
               </div>
             )}
@@ -365,7 +411,7 @@ export function TechPortalPage() {
             <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">In Progress</div>
             <div className="text-lg font-extrabold text-blue-600">
               {myJobs.filter(j => {
-                const s = statuses[String(j.id)] ?? jobStatusToTechStatus(j.status);
+                const s = statuses[j._id] ?? jobStatusToTechStatus(j.status);
                 return s === "in-progress" || s === "en-route" || s === "on-site";
               }).length}
             </div>
@@ -391,7 +437,7 @@ export function TechPortalPage() {
           </span>
           <div className="flex flex-wrap gap-1.5">
             {todayOff.filter(r => r.employeeName !== (currentTech?.name ?? "")).map(r => (
-              <span key={r.id} className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 rounded-full px-2.5 py-0.5 font-medium capitalize">
+              <span key={r._id ?? r.id} className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 rounded-full px-2.5 py-0.5 font-medium capitalize">
                 {r.employeeName} · {r.type.replace(/-/g, " ")}
               </span>
             ))}
@@ -399,138 +445,62 @@ export function TechPortalPage() {
         </div>
       )}
 
-      {/* Job Cards */}
-      <div className="space-y-3">
-        <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-wider">
-          Today's Route — {myJobs.length} job{myJobs.length !== 1 ? "s" : ""}
-          {assignedOpenJobs.length > 0 && (
-            <span className="ml-2 text-primary">({assignedOpenJobs.length} newly assigned)</span>
-          )}
-        </h2>
-
+      {/* Job Cards — Past / Today / Upcoming / Open */}
+      <div className="space-y-6">
         {myJobs.length === 0 && (
           <Card>
             <CardContent className="py-12 text-center">
               <ClipboardList className="size-10 text-muted-foreground mx-auto mb-3" />
               <div className="text-muted-foreground text-sm">
-                {employees.length === 0 ? "Loading…" : "No jobs scheduled for today."}
+                {employees.length === 0 ? "Loading…" : "No jobs assigned to you yet."}
               </div>
             </CardContent>
           </Card>
         )}
 
-        {myJobs.map((job, idx) => {
-          const status   = statuses[String(job.id)] ?? jobStatusToTechStatus(job.status);
-          const nextLabel = getNextLabel(status);
-          const isOpenJob = job.id < 0; // open jobs have negative synthetic IDs
-          return (
-            <Card
-              key={job.id}
-              className={`overflow-hidden transition-all ${isOpenJob ? "ring-1 ring-primary/30" : ""} ${status === "completed" ? "opacity-70" : "hover:shadow-md cursor-pointer"}`}
-              onClick={() => !isOpenJob && navigate(`/jobs/${job.id}`)}
-            >
-              {/* Status stripe */}
-              <div className={`h-1.5 ${getStatusStripColor(status)}`} />
-              <CardContent className="p-4">
-                <div className="flex items-start gap-4">
-                  {/* Timeline number + icon */}
-                  <div className="flex flex-col items-center gap-1 shrink-0">
-                    <div className="text-xs font-bold text-muted-foreground">{idx + 1}</div>
-                    {getStatusIcon(status)}
-                  </div>
+        {/* ── Today ── */}
+        {todayJobs.length > 0 && (
+          <div className="space-y-3">
+            <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+              <span className="size-2 rounded-full bg-primary inline-block" />
+              Today — {todayJobs.length} job{todayJobs.length !== 1 ? "s" : ""}
+            </h2>
+            {todayJobs.map((job, idx) => <JobCard key={job._id} job={job} idx={idx} statuses={statuses} navigate={navigate} advanceStatus={advanceStatus} openJobs={openJobs} />)}
+          </div>
+        )}
 
-                  {/* Content */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="font-semibold text-sm truncate">
-                          {job.customerName}
-                          {isOpenJob && (
-                            <Badge className="ml-2 text-[9px] bg-primary/20 text-primary border-0">Newly Assigned</Badge>
-                          )}
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          {serviceTypeLabel(job.serviceType)}
-                        </div>
-                      </div>
-                      <Badge className={`text-[9px] shrink-0 ${getStatusBg(status)}`}>
-                        {status.replace("-", " ")}
-                      </Badge>
-                    </div>
+        {/* ── Upcoming ── */}
+        {upcomingJobs.length > 0 && (
+          <div className="space-y-3">
+            <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+              <span className="size-2 rounded-full bg-blue-500 inline-block" />
+              Upcoming — {upcomingJobs.length} job{upcomingJobs.length !== 1 ? "s" : ""}
+            </h2>
+            {upcomingJobs.map((job, idx) => <JobCard key={job._id} job={job} idx={idx} statuses={statuses} navigate={navigate} advanceStatus={advanceStatus} openJobs={openJobs} />)}
+          </div>
+        )}
 
-                    {/* Address */}
-                    <div className="flex items-center gap-1.5 mt-2 text-xs text-muted-foreground">
-                      <MapPin className="size-3 shrink-0" />
-                      <span className="truncate">{job.customerAddress}</span>
-                    </div>
+        {/* ── Newly Assigned (open jobs) ── */}
+        {openJobCards.length > 0 && (
+          <div className="space-y-3">
+            <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+              <span className="size-2 rounded-full bg-amber-500 inline-block" />
+              Newly Assigned — {openJobCards.length}
+            </h2>
+            {openJobCards.map((job, idx) => <JobCard key={job._id} job={job} idx={idx} statuses={statuses} navigate={navigate} advanceStatus={advanceStatus} openJobs={openJobs} />)}
+          </div>
+        )}
 
-                    {/* Co-workers (open jobs only) */}
-                    {isOpenJob && (() => {
-                      const openJob = openJobs.find(oj => oj.id === -job.id);
-                      const coNames = openJob?.coTechnicianNames ?? [];
-                      return coNames.length > 0 ? (
-                        <div className="flex items-center gap-1.5 mt-1 text-xs text-primary">
-                          <UserRound className="size-3 shrink-0" />
-                          <span>Working with: {coNames.join(", ")}</span>
-                        </div>
-                      ) : null;
-                    })()}
-
-                    {job.scheduledTime && (
-                      <div className="flex items-center gap-1.5 mt-1 text-xs text-muted-foreground">
-                        <Clock className="size-3 shrink-0" />
-                        <span>{job.scheduledTime}</span>
-                      </div>
-                    )}
-
-                    {job.notes && (
-                      <div className="mt-2 text-[11px] text-muted-foreground italic bg-muted/40 rounded px-2 py-1">
-                        {job.notes}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Action buttons */}
-                {status !== "completed" && nextLabel && (
-                  <div className="flex gap-2 mt-3 pt-3 border-t">
-                    <Button
-                      size="sm"
-                      className="flex-1 gap-1.5 h-8"
-                      onClick={e => { e.stopPropagation(); advanceStatus(job); }}
-                    >
-                      <Check className="size-3.5" /> {nextLabel}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="gap-1.5 h-8 px-3"
-                      onClick={e => { e.stopPropagation(); navigate("/messages"); }}
-                    >
-                      <MessageSquare className="size-3.5" />
-                    </Button>
-                    {!isOpenJob && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="gap-1.5 h-8 px-3"
-                        onClick={e => { e.stopPropagation(); navigate(`/jobs/${job.id}`); }}
-                      >
-                        <ChevronRight className="size-3.5" />
-                      </Button>
-                    )}
-                  </div>
-                )}
-
-                {status === "completed" && (
-                  <div className="flex items-center gap-1.5 mt-3 pt-3 border-t text-xs text-emerald-600 font-medium">
-                    <CheckCircle2 className="size-3.5" /> Completed
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          );
-        })}
+        {/* ── Past ── */}
+        {pastJobs.length > 0 && (
+          <div className="space-y-3">
+            <h2 className="text-sm font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+              <span className="size-2 rounded-full bg-gray-400 inline-block" />
+              Past Jobs — {pastJobs.length}
+            </h2>
+            {pastJobs.map((job, idx) => <JobCard key={job._id} job={job} idx={idx} statuses={statuses} navigate={navigate} advanceStatus={advanceStatus} openJobs={openJobs} />)}
+          </div>
+        )}
       </div>
 
       {/* Quick Links */}
@@ -561,9 +531,9 @@ export function TechPortalPage() {
         </Card>
       </div>
 
-      {/* Complete Job Dialog — with service checklist */}
+      {/* Complete Job Dialog */}
       <Dialog open={completeOpen} onOpenChange={o => !o && setCompleteOpen(false)}>
-        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <CheckCircle2 className="size-5 text-emerald-600" />
@@ -571,40 +541,6 @@ export function TechPortalPage() {
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            {/* Service type badge */}
-            {completingJob && (
-              <div className="text-xs text-muted-foreground bg-muted/50 rounded-lg px-3 py-2">
-                <span className="font-semibold">Service: </span>{serviceTypeLabel(completingJob.serviceType)}
-              </div>
-            )}
-
-            {/* Completion checklist */}
-            {Object.keys(compChecklist).length > 0 && (
-              <div>
-                <Label className="text-xs font-semibold mb-2 block">
-                  Completion Checklist
-                  <span className="ml-2 font-normal text-muted-foreground">
-                    {Object.values(compChecklist).filter(Boolean).length}/{Object.keys(compChecklist).length} done
-                  </span>
-                </Label>
-                <div className="space-y-1.5 bg-muted/30 rounded-lg p-3">
-                  {Object.entries(compChecklist).map(([item, checked]) => (
-                    <label key={item} className="flex items-start gap-2.5 cursor-pointer group">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={e => setCompChecklist(prev => ({ ...prev, [item]: e.target.checked }))}
-                        className="mt-0.5 size-3.5 rounded accent-emerald-600 cursor-pointer"
-                      />
-                      <span className={`text-xs leading-tight transition-colors ${checked ? "line-through text-muted-foreground" : "text-foreground group-hover:text-primary"}`}>
-                        {item}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-
             <div>
               <Label className="text-xs font-semibold">Completion Notes</Label>
               <Textarea
@@ -616,7 +552,7 @@ export function TechPortalPage() {
               />
             </div>
             <div>
-              <Label className="text-xs font-semibold">Deficiencies Found <span className="font-normal text-muted-foreground">(optional)</span></Label>
+              <Label className="text-xs font-semibold">Deficiencies Found (optional)</Label>
               <Textarea
                 className="mt-1 text-sm resize-none"
                 rows={2}
@@ -630,22 +566,14 @@ export function TechPortalPage() {
                 <Upload className="size-3.5" /> <span>Photo upload: available in full desktop portal</span>
               </div>
               <div className="flex items-center gap-2">
-                <Camera className="size-3.5" /> <span>Certificate will be auto-generated on completion</span>
+                <Camera className="size-3.5" /> <span>Certificate will be auto-generated</span>
               </div>
             </div>
             <div className="flex gap-2">
-              <button
-                className="flex-1 border border-input rounded-md px-3 py-2 text-sm hover:bg-muted/50 transition-colors"
-                onClick={() => setCompleteOpen(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="flex-1 gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md px-3 py-2 text-sm font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
-                onClick={confirmComplete}
-              >
+              <Button variant="outline" className="flex-1" onClick={() => setCompleteOpen(false)}>Cancel</Button>
+              <Button className="flex-1 gap-1.5 bg-emerald-600 hover:bg-emerald-700" onClick={confirmComplete}>
                 <CheckCircle2 className="size-4" /> Mark Complete
-              </button>
+              </Button>
             </div>
           </div>
         </DialogContent>

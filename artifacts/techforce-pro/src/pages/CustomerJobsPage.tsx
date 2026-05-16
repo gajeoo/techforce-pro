@@ -1,4 +1,7 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import type { ConvexJob, ConvexCustomer } from "@/lib/convex-types";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -28,7 +31,6 @@ import {
 } from "@/components/ui/select";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { getJobs, type ApiJob } from "@/lib/api";
 
 type SortKey = "scheduledDate" | "serviceType" | "status" | "revenue";
 type SortDir = "asc" | "desc";
@@ -74,22 +76,19 @@ function formatCurrency(n: number) {
 export function CustomerJobsPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-
-  const [jobs, setJobs] = useState<ApiJob[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
+  const allJobs = (useQuery(api.jobs.list) ?? []) as ConvexJob[];
+  const allCustomers = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
+  // Sort by creation time for deterministic ordering, then index by numeric auth ID
+  // (demo app — no real auth; customer role maps to a sequential picker ID)
+  const customerId = parseInt((user?.id ?? "").replace(/\D/g, "")) || 1;
+  const sortedCustomers = [...allCustomers].sort((a, b) => a._creationTime - b._creationTime);
+  const myCust: ConvexCustomer | undefined = sortedCustomers[customerId - 1];
+  // Never fall back to showing all jobs — show nothing while loading or if lookup fails
+  const jobs = myCust ? allJobs.filter(j => j.customerId === myCust._id) : [];
+    const [search, setSearch] = useState("");
   const [filterStatus, setFilter] = useState<FilterStatus>("all");
   const [sortKey, setSortKey] = useState<SortKey>("scheduledDate");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
-
-  // Load real jobs filtered by customerId
-  useEffect(() => {
-    const customerId = user?.id ?? "";
-    getJobs(customerId ? { customerId } : undefined)
-      .then(data => setJobs(data))
-      .catch(() => setJobs([]))
-      .finally(() => setLoading(false));
-  }, [user?.id]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -219,7 +218,7 @@ export function CustomerJobsPage() {
             <Calendar className="size-4 text-primary" /> All Jobs
           </CardTitle>
           <CardDescription>
-            {loading ? "Loading…" : `${filtered.length} of ${jobs.length} jobs shown`}
+            {`${filtered.length} of ${jobs.length} jobs shown`}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -270,9 +269,7 @@ export function CustomerJobsPage() {
 
           {/* Table */}
           <div className="rounded-lg border overflow-hidden">
-            {loading ? (
-              <div className="text-center py-12 text-muted-foreground text-sm">Loading jobs…</div>
-            ) : filtered.length === 0 ? (
+            {filtered.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground text-sm">
                 {jobs.length === 0 ? "No jobs on record for your account." : "No jobs match your filters."}
               </div>

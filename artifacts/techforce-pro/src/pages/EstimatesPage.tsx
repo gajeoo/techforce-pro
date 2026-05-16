@@ -15,7 +15,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { customers, employees } from "@/lib/mockData";
-import { getEmployees, createJob, type ApiEmployee } from "@/lib/api";
+import { useQuery, useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { downloadEstimatePdf } from "@/lib/docDownload";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -445,8 +446,9 @@ function ConvertToJobDialog({
   open: boolean;
   onClose: () => void;
   onConverted: (estId: string) => void;
-  employees: ApiEmployee[];
+  employees: any[];
 }) {
+  const createJobFn = useMutation(api.jobs.create);
   const [employeeId, setEmployeeId] = useState("");
   const [jobDate,    setJobDate]    = useState("");
   const [notes,      setNotes]      = useState("");
@@ -465,7 +467,7 @@ function ConvertToJobDialog({
     if (!jobDate) { toast.error("Please select a scheduled date"); return; }
     setSaving(true);
     try {
-      await createJob({
+      await createJobFn({
         customerId:        Number(safeEst.customerId) || 1,
         employeeId:        employeeId ? Number(employeeId) : null,
         serviceType:       primaryService,
@@ -568,6 +570,7 @@ function ConvertToJobDialog({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function EstimatesPage() {
+  const createJobFn = useMutation(api.jobs.create);
   const [estimates, setEstimates] = useState<Estimate[]>(INIT_ESTIMATES);
   const [statusFilter, setStatusFilter] = useState<EstimateStatus | "all">("all");
   const [search, setSearch] = useState("");
@@ -578,9 +581,8 @@ export function EstimatesPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [convertEst, setConvertEst] = useState<Estimate | null>(null);
   const [convertOpen, setConvertOpen] = useState(false);
-  const [apiEmployees, setApiEmployees] = useState<ApiEmployee[]>([]);
+  const apiEmployees = (useQuery(api.employees.list) ?? []) as any[];
 
-  useEffect(() => { getEmployees().then(setApiEmployees).catch(() => {}); }, []);
 
   const filtered = estimates.filter(e => {
     if (statusFilter !== "all" && e.status !== statusFilter) return false;

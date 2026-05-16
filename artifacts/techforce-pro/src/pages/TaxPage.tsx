@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import {
   Receipt, DollarSign, Download, TrendingDown, TrendingUp,
   AlertCircle, FileText, Calendar, Building2,
@@ -10,7 +10,8 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { getInvoices, getEmployees, type ApiInvoice, type ApiEmployee } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { toast } from "sonner";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -41,20 +42,9 @@ function fmtCurrency(n: number) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export function TaxPage() {
-  const [invoices,  setInvoices]  = useState<ApiInvoice[]>([]);
-  const [employees, setEmployees] = useState<ApiEmployee[]>([]);
-  const [loading,   setLoading]   = useState(true);
-  const [year,      setYear]      = useState(new Date().getFullYear());
-
-  useEffect(() => {
-    Promise.all([getInvoices(), getEmployees()])
-      .then(([invs, emps]) => {
-        setInvoices(invs);
-        setEmployees(emps);
-      })
-      .catch(() => toast.error("Failed to load tax data"))
-      .finally(() => setLoading(false));
-  }, []);
+  const invoices  = (useQuery(api.invoices.list)   ?? []) as any[];
+  const employees = (useQuery(api.employees.list) ?? []) as any[];
+  const [year, setYear] = useState(new Date().getFullYear());
 
   // ── Revenue for selected year ──
   const yearInvoices = useMemo(
@@ -214,7 +204,7 @@ export function TaxPage() {
               ))}
             </SelectContent>
           </Select>
-          <Button variant="outline" className="gap-2" onClick={downloadCsv} disabled={loading}>
+          <Button variant="outline" className="gap-2" onClick={downloadCsv} disabled={false}>
             <Download className="size-4" /> Download CSV
           </Button>
         </div>
@@ -231,11 +221,7 @@ export function TaxPage() {
         </div>
       </div>
 
-      {loading ? (
-        <div className="flex items-center justify-center py-24 text-muted-foreground text-sm gap-2">
-          <Receipt className="size-5 animate-pulse" /> Loading tax data…
-        </div>
-      ) : (
+      { (
         <>
           {/* KPI Cards */}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

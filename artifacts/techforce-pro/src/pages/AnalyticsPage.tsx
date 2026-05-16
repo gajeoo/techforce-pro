@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
+import type { ConvexJob, ConvexEmployee, ConvexInvoice } from "@/lib/convex-types";
 import {
   BarChart3, DollarSign, TrendingUp, TrendingDown, Activity,
   Download, Users, AlertCircle, CheckCircle2, Clock, FileText,
@@ -12,7 +13,9 @@ import {
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { getInvoices, getEmployees, getJobs, type ApiInvoice, type ApiEmployee, type ApiJob } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+
 
 const fmt = (n: number) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
@@ -54,21 +57,9 @@ const BURDEN_RATE = 0.30;
 
 export function AnalyticsPage() {
   const [period, setPeriod] = useState<"ytd" | "q1" | "q2" | "q3" | "q4">("ytd");
-  const [invoices,     setInvoices]     = useState<ApiInvoice[]>([]);
-  const [apiEmployees, setApiEmployees] = useState<ApiEmployee[]>([]);
-  const [jobs,         setJobs]         = useState<ApiJob[]>([]);
-  const [loading,      setLoading]      = useState(true);
-
-  useEffect(() => {
-    Promise.all([getInvoices(), getEmployees(), getJobs()])
-      .then(([invs, emps, jbs]) => {
-        setInvoices(invs);
-        setApiEmployees(emps);
-        setJobs(jbs);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+  const invoices     = (useQuery(api.invoices.list)   ?? []) as ConvexInvoice[];
+  const apiEmployees = (useQuery(api.employees.list) ?? []) as ConvexEmployee[];
+  const jobs         = (useQuery(api.jobs.list)       ?? []) as ConvexJob[];
 
   // ── Monthly data computed from real invoices ──
   const allMonthlyData = useMemo(() => {
@@ -116,8 +107,8 @@ export function AnalyticsPage() {
     }
   }, [allMonthlyData, period]);
 
-  // ── KPIs ──
-  const ytdRevenue  = periodData.reduce((s, m) => s + m.revenue, 0);
+  // ── KPIs — ytdRevenue from completed jobs to match Dashboard KPI ──
+  const ytdRevenue  = jobs.filter(j => j.status === "completed").reduce((s, j) => s + (j.revenue ?? 0), 0);
   const ytdCost     = periodData.reduce((s, m) => s + m.cost, 0);
   const ytdProfit   = ytdRevenue - ytdCost;
   const ytdMargin   = ytdRevenue > 0 ? (ytdProfit / ytdRevenue) * 100 : 0;
@@ -175,7 +166,7 @@ export function AnalyticsPage() {
 
   // ── Tech performance from actual job revenue ──
   const techData = useMemo(() => {
-    const revByEmp = new Map<number, number>();
+    const revByEmp = new Map<string, number>();
     jobs.filter(j => j.status === "completed" && j.employeeId != null).forEach(j => {
       revByEmp.set(j.employeeId!, (revByEmp.get(j.employeeId!) ?? 0) + j.revenue);
     });
@@ -183,9 +174,9 @@ export function AnalyticsPage() {
       const hr = e.hourlyRate ?? (Number(e.salary) / 2080);
       const dailyCost = hr * (e.hoursPerDay ?? 8) * (1 + BURDEN_RATE) + DAILY_FUEL + DAILY_TOOLS;
       const monthlyCost = dailyCost * 21;
-      const revenue = revByEmp.get(e.id) ?? 0;
+      const revenue = revByEmp.get(e._id) ?? 0;
       return {
-        name:       e.name.split(" ")[0],
+        name:       (e.name ?? "Unknown").split(" ")[0],
         revenue:    Math.round(revenue),
         cost:       Math.round(monthlyCost),
         profit:     Math.round(revenue - monthlyCost),
@@ -214,7 +205,7 @@ export function AnalyticsPage() {
     a.click();
   }
 
-  if (loading) {
+  if (!invoices.length && !apiEmployees.length && !jobs.length) {
     return (
       <div className="flex items-center justify-center py-24 text-muted-foreground gap-2 text-sm">
         <Activity className="size-5 animate-pulse" /> Loading analytics…

@@ -36,6 +36,7 @@ export const list = query({
       customerName: custMap[j.customerId]?.name ?? "Unknown",
       customerAddress: custMap[j.customerId]?.address ?? "",
       employeeName: j.employeeId ? (empMap[j.employeeId]?.name ?? null) : null,
+      revenue: Number(j.revenue) || Number(j.amount) || 0,
     }));
   },
 });

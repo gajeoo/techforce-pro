@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import {
   Banknote, Users, Download, RefreshCw, ChevronDown, ChevronRight,
   Briefcase, TrendingUp, DollarSign, Calendar, FileText, AlertCircle,
@@ -11,7 +11,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { getEmployees, getJobs, getInvoices, type ApiEmployee, type ApiJob, type ApiInvoice } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { toast } from "sonner";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -114,8 +115,8 @@ function getPeriodBounds(period: string): { start: Date; end: Date; label: strin
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface JobWithInvoice {
-  job: ApiJob;
-  invoice: ApiInvoice | null;
+  job: any;
+  invoice: any | null;
   billedRevenue: number;
   reAttributed: boolean;
 }
@@ -135,7 +136,7 @@ interface DayEntry {
 }
 
 interface PayrollRow {
-  employee: ApiEmployee;
+  employee: any;
   hourlyRate: number;
   hoursPerDay: number;
   dailyBreakdown: DayEntry[];
@@ -442,7 +443,7 @@ function TimesheetDetail({ row }: { row: PayrollRow }) {
 function PayrollCard({ row }: { row: PayrollRow }) {
   const [expanded, setExpanded] = useState(false);
   const emp = row.employee;
-  const initials = emp.name.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase();
+  const initials = emp.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase();
   const invoicedCount = row.jobsWithInvoices.filter(j => j.invoice).length;
 
   return (
@@ -528,32 +529,19 @@ function PayrollCard({ row }: { row: PayrollRow }) {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function PayrollPage() {
-  const [employees, setEmployees] = useState<ApiEmployee[]>([]);
-  const [jobs,      setJobs]      = useState<ApiJob[]>([]);
-  const [invoices,  setInvoices]  = useState<ApiInvoice[]>([]);
-  const [loading,   setLoading]   = useState(true);
+  const employees = (useQuery(api.employees.list) ?? []) as any[];
+  const jobs      = (useQuery(api.jobs.list)       ?? []) as any[];
+  const invoices  = (useQuery(api.invoices.list)   ?? []) as any[];
   const [period,    setPeriod]    = useState("this_month");
   const [empFilter, setEmpFilter] = useState("all");
   const [rateMode,  setRateMode]  = useState<"hourly" | "salary">("hourly");
   const [hoursPerDay, setHoursPerDay] = useState(8);
 
-  useEffect(() => {
-    setLoading(true);
-    Promise.all([getEmployees(), getJobs(), getInvoices()])
-      .then(([emps, jbs, invs]) => {
-        setEmployees(emps);
-        setJobs(jbs);
-        setInvoices(invs);
-      })
-      .catch(() => toast.error("Failed to load payroll data"))
-      .finally(() => setLoading(false));
-  }, []);
-
   const { start, end, label } = useMemo(() => getPeriodBounds(period), [period]);
   const workingDays = useMemo(() => countWeekdays(start, end), [start, end]);
 
   const invoiceByJobId = useMemo(() => {
-    const map = new Map<number, ApiInvoice>();
+    const map = new Map<number, any>();
     for (const inv of invoices) {
       if (inv.jobId != null) map.set(inv.jobId, inv);
     }
@@ -665,7 +653,7 @@ export function PayrollPage() {
 
   const displayRows = useMemo(() => {
     if (empFilter === "all") return allRows;
-    return allRows.filter(r => String(r.employee.id) === empFilter);
+    return allRows.filter(r => String(r.employee._id ?? r.employee.id) === empFilter);
   }, [allRows, empFilter]);
 
   const totals = useMemo(() => ({
@@ -675,13 +663,7 @@ export function PayrollPage() {
     jobs:    displayRows.reduce((s, r) => s + r.jobsWithInvoices.length, 0),
   }), [displayRows]);
 
-  function handleRefresh() {
-    setLoading(true);
-    Promise.all([getEmployees(), getJobs(), getInvoices()])
-      .then(([emps, jbs, invs]) => { setEmployees(emps); setJobs(jbs); setInvoices(invs); })
-      .catch(() => toast.error("Failed to refresh"))
-      .finally(() => setLoading(false));
-  }
+  function handleRefresh() { /* Convex auto-refreshes */ }
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -755,9 +737,9 @@ export function PayrollPage() {
           </SelectContent>
         </Select>
 
-        <Button variant="outline" onClick={handleRefresh} disabled={loading} className="gap-2">
-          <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
-          {loading ? "Loading…" : "Refresh"}
+        <Button variant="outline" onClick={handleRefresh} disabled={false} className="gap-2">
+          <RefreshCw className={`size-4 ${""}`} />
+          {"Refresh"}
         </Button>
 
         <Button variant="outline" onClick={() => exportPayrollCsv(displayRows, period)} className="gap-2" disabled={displayRows.length === 0}>
@@ -833,12 +815,7 @@ export function PayrollPage() {
       </div>
 
       {/* Employee Cards */}
-      {loading ? (
-        <div className="flex items-center justify-center py-16 text-muted-foreground gap-2">
-          <RefreshCw className="size-5 animate-spin" />
-          <span>Loading payroll data…</span>
-        </div>
-      ) : displayRows.length === 0 ? (
+      {displayRows.length === 0 ? (
         <Card>
           <CardContent className="p-8 text-center text-muted-foreground text-sm">
             No employees found. Add employees to generate payroll reports.

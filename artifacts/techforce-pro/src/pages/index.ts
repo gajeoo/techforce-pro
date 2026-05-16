@@ -41,3 +41,5 @@ export { CustomerRequestsPage } from "./CustomerRequestsPage";
 export { DataManagementPage } from "./DataManagementPage";
 export { PayrollPage } from "./PayrollPage";
 export { TaxPage } from "./TaxPage";
+export { default as AdvancedAnalyticsPage } from "./AdvancedAnalyticsPage";
+export { default as NotificationsPage } from "./NotificationsPage";

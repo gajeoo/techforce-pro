@@ -1,4 +1,6 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import {
   TrendingUp, TrendingDown, Users, Briefcase, DollarSign, Target,
   BarChart3, Zap, AlertCircle, Eye, EyeOff, Download, Loader2,
@@ -14,19 +16,59 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   ScatterChart, Scatter,
 } from "recharts";
-import { getDashboardSummary, getEmployees, getJobs, getInvoices, getCustomers } from "@/lib/api";
 import {
   calculateJobMetrics, calculateEmployeePerformance, calculateCustomerMetrics,
   calculateRevenueAnalytics, generatePerformanceInsights, formatMetric,
   type AnalyticsMetric, type EmployeePerformance,
+  type AnalyticsJob, type AnalyticsEmployee, type AnalyticsCustomer, type AnalyticsInvoice,
 } from "@/lib/analytics";
 import { exportToCSV, exportToJSON, generateReport } from "@/lib/exportImport";
+import type { ConvexEmployee, ConvexJob, ConvexInvoice, ConvexCustomer } from "@/lib/convex-types";
+
+// ─── Adapters: map Convex document shapes to minimal analytics interfaces ─────
+//
+// The analytics helpers only access a small subset of fields and use a stable
+// `id` key for cross-entity joins.  Convex documents use `_id` (string), so we
+// remap it here — keeping full type safety without casting.
+
+function toAnalyticsJob(j: ConvexJob): AnalyticsJob {
+  return {
+    id: j._id,
+    status: j.status,
+    dueDate: j.dueDate ?? null,
+    serviceType: j.serviceType,
+    employeeId: j.employeeId ?? null,
+    customerId: j.customerId,
+    revenue: j.revenue,
+  };
+}
+
+function toAnalyticsEmployee(e: ConvexEmployee): AnalyticsEmployee {
+  return {
+    id: e._id,
+    name: e.name,
+    utilizationPct: e.utilizationPct !== undefined ? Number(e.utilizationPct) : undefined,
+  };
+}
+
+function toAnalyticsCustomer(c: ConvexCustomer): AnalyticsCustomer {
+  return { id: c._id, name: c.name };
+}
+
+function toAnalyticsInvoice(i: ConvexInvoice): AnalyticsInvoice {
+  return {
+    jobId: i.jobId ?? null,
+    customerId: i.customerId,
+    techId: i.techId ?? null,
+    totalAmount: i.totalAmount,
+    generatedAt: i.generatedAt ?? null,
+  };
+}
 
 // ─── Page Component ───────────────────────────────────────────────────────────
 
 export default function AdvancedAnalyticsPage() {
-  const [loading, setLoading] = useState(true);
-  const [activeMetrics, setActiveMetrics] = useState<Record<string, boolean>>({
+    const [activeMetrics, setActiveMetrics] = useState<Record<string, boolean>>({
     revenue: true,
     jobs: true,
     employees: true,
@@ -34,52 +76,36 @@ export default function AdvancedAnalyticsPage() {
   });
   const [timeRange, setTimeRange] = useState<"week" | "month" | "quarter">("month");
 
-  const [summary, setSummary] = useState<any>(null);
-  const [employees, setEmployees] = useState<any[]>([]);
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [invoices, setInvoices] = useState<any[]>([]);
-  const [customers, setCustomers] = useState<any[]>([]);
+  const summary = useQuery(api.dashboard.summary);
+  const employees = (useQuery(api.employees.list) ?? []) as ConvexEmployee[];
+  const jobs      = (useQuery(api.jobs.list, {})   ?? []) as ConvexJob[];
+  const invoices  = (useQuery(api.invoices.list, {}) ?? []) as ConvexInvoice[];
+  const customers = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
 
-  useEffect(() => {
-    loadAnalyticsData();
-  }, []);
+  // Convert Convex docs to the minimal analytics-compatible shapes.
+  // Adapters remap _id → id so cross-entity joins inside the helpers work correctly.
+  const analyticsJobs      = useMemo(() => jobs.map(toAnalyticsJob),      [jobs]);
+  const analyticsEmployees = useMemo(() => employees.map(toAnalyticsEmployee), [employees]);
+  const analyticsCustomers = useMemo(() => customers.map(toAnalyticsCustomer), [customers]);
+  const analyticsInvoices  = useMemo(() => invoices.map(toAnalyticsInvoice),  [invoices]);
 
-  async function loadAnalyticsData() {
-    try {
-      setLoading(true);
-      const [sumData, empData, jobData, invData, custData] = await Promise.all([
-        getDashboardSummary(),
-        getEmployees(),
-        getJobs(),
-        getInvoices(),
-        getCustomers(),
-      ]);
-
-      setSummary(sumData);
-      setEmployees(empData);
-      setJobs(jobData);
-      setInvoices(invData);
-      setCustomers(custData);
-    } catch (err) {
-      console.error("Failed to load analytics:", err);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // Calculated metrics
-  const jobMetrics = useMemo(() => jobs ? calculateJobMetrics(jobs) : null, [jobs]);
+  const jobMetrics = useMemo(
+    () => analyticsJobs.length ? calculateJobMetrics(analyticsJobs) : null,
+    [analyticsJobs],
+  );
   const employeePerformance = useMemo(
-    () => employees.map(e => calculateEmployeePerformance(e, jobs || [], invoices || [])),
-    [employees, jobs, invoices]
+    () => analyticsEmployees.map(e => calculateEmployeePerformance(e, analyticsJobs, analyticsInvoices)),
+    [analyticsEmployees, analyticsJobs, analyticsInvoices],
   );
   const customerMetrics = useMemo(
-    () => customers.map(c => calculateCustomerMetrics(c, jobs || [], invoices || [])),
-    [customers, jobs, invoices]
+    () => analyticsCustomers.map(c => calculateCustomerMetrics(c, analyticsJobs, analyticsInvoices)),
+    [analyticsCustomers, analyticsJobs, analyticsInvoices],
   );
   const revenueMetrics = useMemo(
-    () => invoices && jobs ? calculateRevenueAnalytics(jobs, invoices) : null,
-    [jobs, invoices]
+    () => analyticsInvoices.length && analyticsJobs.length
+      ? calculateRevenueAnalytics(analyticsJobs, analyticsInvoices)
+      : null,
+    [analyticsJobs, analyticsInvoices],
   );
   const insights = useMemo(
     () => jobMetrics && employeePerformance && customerMetrics
@@ -107,7 +133,7 @@ export default function AdvancedAnalyticsPage() {
     }
   };
 
-  if (loading) {
+  if (!employees.length && !jobs.length) {
     return (
       <div className="flex items-center justify-center h-96">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />

@@ -1,1603 +1,1103 @@
-import { useState, useRef, useMemo } from "react";
+import { useRef, useState, useEffect } from "react";
+import { useMutation, useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import {
-  Database, Download, Upload, Trash2, Play, CheckCircle2,
-  AlertTriangle, FileJson, Users, Building2, Briefcase,
-  FileText, RefreshCw, Info, Package, FileCode2, TableProperties,
-  ChevronRight, Search, ArrowLeft, DollarSign, X,
+  AlertTriangle, CheckCircle2, Database, Download, FileJson,
+  FileSpreadsheet, FileText, Play, Trash2, Upload, Users,
+  Building2, Briefcase, Car, Clock, ClipboardList,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
-import {
-  adminSeedDemo, adminClearAll, adminExport, adminImport,
-  type AdminExportData,
-} from "@/lib/api";
 import { toast } from "sonner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Fingerprint helpers ──────────────────────────────────────────────────────
 
-function downloadJson(data: unknown, filename: string) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+const IMPORT_LOG_KEY = "tfp-import-log";
+
+function djb2(str: string): number {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h) ^ str.charCodeAt(i);
+  return h >>> 0;
+}
+
+function makeFingerprint(content: string): string {
+  return String(djb2(content.slice(0, 8000) + content.length));
+}
+
+type ImportLogEntry = { fingerprint: string; importedAt: string; label: string };
+
+function getImportLog(): ImportLogEntry[] {
+  try { return JSON.parse(localStorage.getItem(IMPORT_LOG_KEY) ?? "[]"); } catch { return []; }
+}
+
+function saveImportLog(log: ImportLogEntry[]) {
+  localStorage.setItem(IMPORT_LOG_KEY, JSON.stringify(log.slice(-50)));
+}
+
+function recordImport(fingerprint: string, label: string) {
+  const log = getImportLog();
+  log.push({ fingerprint, importedAt: new Date().toISOString(), label });
+  saveImportLog(log);
+}
+
+function checkDuplicate(fingerprint: string): ImportLogEntry | null {
+  return getImportLog().find(e => e.fingerprint === fingerprint) ?? null;
+}
+
+// ─── CSV helpers ─────────────────────────────────────────────────────────────
+
+function toCsv(rows: Record<string, unknown>[]): string {
+  if (!rows.length) return "";
+  const keys = Object.keys(rows[0]).filter(k => !["_id", "_creationTime"].includes(k));
+  const esc = (v: unknown) => {
+    const s = v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+    return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [keys.join(","), ...rows.map(r => keys.map(k => esc(r[k])).join(","))].join("\n");
+}
+
+function parseCsv(text: string): Record<string, string>[] {
+  // Strip BOM if present
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  // Full RFC 4180-ish parser: supports embedded newlines, "" escapes, CR/LF
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cur = "";
+  let inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { cur += '"'; i++; }
+        else { inQ = false; }
+      } else { cur += ch; }
+    } else {
+      if (ch === '"') { inQ = true; }
+      else if (ch === ",") { row.push(cur); cur = ""; }
+      else if (ch === "\r") { /* skip */ }
+      else if (ch === "\n") { row.push(cur); cur = ""; rows.push(row); row = []; }
+      else { cur += ch; }
+    }
+  }
+  if (cur !== "" || row.length) { row.push(cur); rows.push(row); }
+  // Drop fully-empty rows
+  const filled = rows.filter(r => r.some(c => c.trim() !== ""));
+  if (filled.length < 2) return [];
+  const headers = filled[0].map(h => h.trim());
+  return filled.slice(1).map(vals =>
+    Object.fromEntries(headers.map((h, i) => [h, (vals[i] ?? "").trim()]))
+  );
+}
+
+// ─── ServiceFusion HTML parser ────────────────────────────────────────────────
+
+function isServiceFusionReport(html: string): boolean {
+  return html.includes("rateTable") && html.includes("customerName");
+}
+
+function cleanAmount(raw: string): number {
+  const n = parseFloat(raw.replace(/[$*,\s]/g, ""));
+  return isNaN(n) ? 0 : n;
+}
+
+function mapSFStatus(sfStatus: string): { status: string; invoiceStatus: string } {
+  switch (sfStatus.toLowerCase().trim()) {
+    case "invoiced":     return { status: "completed",   invoiceStatus: "sent"  };
+    case "completed":    return { status: "completed",   invoiceStatus: "draft" };
+    case "scheduled":    return { status: "scheduled",   invoiceStatus: "none"  };
+    case "in progress":  return { status: "in_progress", invoiceStatus: "none"  };
+    case "cancelled":
+    case "canceled":     return { status: "cancelled",   invoiceStatus: "none"  };
+    default:             return { status: "pending",     invoiceStatus: "none"  };
+  }
+}
+
+function parseServiceFusionSalesByTech(html: string): DataBundle {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+
+  // Tech name lives in .customerName td
+  const techName = doc.querySelector("table.customerName td")?.textContent?.trim() ?? "Unknown Tech";
+  const empId = `sf_emp_${techName.toLowerCase().replace(/\W+/g, "_")}`;
+
+  const employees: Record<string, unknown>[] = [{
+    _id: empId, name: techName,
+    role: "extinguisher_tech", salary: 50000, billableRate: 800,
+    homeZip: "00000", certifications: [], allowedShopDays: 5,
+    shopDaysUsedYtd: 0, allowedTrainingDays: 3, trainingDaysUsedYtd: 0,
+    utilizationPct: 0, isActive: true,
+  }];
+
+  const rateTable = doc.querySelector("table.rateTable");
+  if (!rateTable) return { employees };
+
+  // tbody rows only (skips the two thead header rows automatically)
+  const tbodyRows = Array.from(rateTable.querySelectorAll("tbody tr"));
+
+  const custMap = new Map<string, string>(); // name → syntheticId
+  const customers: Record<string, unknown>[] = [];
+  const jobs: Record<string, unknown>[] = [];
+
+  const dateRe = /^\d{2}\/\d{2}\/\d{4}$/;
+
+  let i = 0;
+  while (i < tbodyRows.length) {
+    const cells = Array.from(tbodyRows[i].querySelectorAll("td"))
+      .map(td => td.textContent?.replace(/\s+/g, " ").trim() ?? "");
+
+    // Job info row: position 1 is a date like 01/02/2026
+    if (cells.length >= 7 && dateRe.test(cells[1])) {
+      const jobNumber    = cells[0];
+      const date         = cells[1];
+      const time         = cells[2];
+      const sfStatus     = cells[3];
+      const jobCategory  = cells[5];
+      const customerName = cells[6];
+      const jobDetails   = (cells[7] ?? "").replace(/\n/g, " ").trim();
+
+      // Register customer
+      if (!custMap.has(customerName)) {
+        const custId = `sf_cust_${customerName.toLowerCase().replace(/\W+/g, "_")}`;
+        custMap.set(customerName, custId);
+        customers.push({
+          _id: custId, name: customerName,
+          facilityType: "commercial", address: "",
+          contactName: "", contactPhone: "",
+          inspectionFrequency: "annual", isActive: true,
+        });
+      }
+      const custId = custMap.get(customerName)!;
+      const { status, invoiceStatus } = mapSFStatus(sfStatus);
+
+      // Look ahead for the financial row (first row where cell[0] starts with $)
+      let revenue = 0;
+      let j = i + 1;
+      while (j < tbodyRows.length) {
+        const fc = Array.from(tbodyRows[j].querySelectorAll("td"))
+          .map(td => td.textContent?.replace(/\s+/g, " ").trim() ?? "");
+        if (fc[0]?.startsWith("$")) {
+          // col 6 = Job Total
+          revenue = cleanAmount(fc[6] ?? "0");
+          i = j + 1;
+          break;
+        }
+        // If we hit the next job info row without finding financials, stop
+        if (fc.length >= 7 && dateRe.test(fc[1])) { i = j; break; }
+        j++;
+      }
+      if (j >= tbodyRows.length) i = j;
+
+      jobs.push({
+        // Foreign keys (resolved by importAll via custIdMap / empIdMap)
+        customerId:  custId,
+        employeeId:  empId,
+        // Display-friendly fields (visible in the editable grid)
+        customer:    customerName,
+        tech:        techName,
+        // Core job fields
+        scheduledDate: date,
+        dueDate:       date,
+        time,
+        serviceType:   jobCategory || "extinguisher_inspection",
+        status,
+        invoiceStatus,
+        priority:      "medium",
+        revenue,
+        quantity:      1,
+        notes:         jobDetails || undefined,
+        certificationRequired: "any",
+        requiresFollowUp:  false,
+        followUpConfirmed: false,
+        sfJobNumber:   jobNumber,
+        sfStatus,
+      });
+    } else {
+      i++;
+    }
+  }
+
+  return { employees, customers, jobs };
+}
+
+// ─── Generic HTML table parser (fallback) ─────────────────────────────────────
+
+function parseHtmlTable(html: string): Record<string, unknown>[] {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+  const table = doc.querySelector("table");
+  if (!table) return [];
+  const headers = Array.from(table.querySelectorAll("th")).map(th => th.textContent?.trim() ?? "");
+  if (!headers.length) {
+    const firstRow = table.querySelector("tr");
+    headers.push(...Array.from(firstRow?.querySelectorAll("td") ?? []).map(td => td.textContent?.trim() ?? ""));
+  }
+  return Array.from(table.querySelectorAll("tr")).slice(1).map(row => {
+    const cells = Array.from(row.querySelectorAll("td")).map(td => td.textContent?.trim() ?? "");
+    return Object.fromEntries(headers.map((h, i) => [h, cells[i] ?? ""]));
+  }).filter(r => Object.values(r).some(v => v !== ""));
+}
+
+// ─── Entity detection from filename ──────────────────────────────────────────
+
+const ENTITY_ALIASES: Record<string, string> = {
+  employee: "employees", employees: "employees", staff: "employees", techs: "employees",
+  customer: "customers", customers: "customers", clients: "customers",
+  location: "customerLocations", locations: "customerLocations", customerlocations: "customerLocations",
+  job: "jobs", jobs: "jobs", workorder: "jobs", workorders: "jobs",
+  openjob: "openJobs", openjobs: "openJobs", "open-jobs": "openJobs",
+  invoice: "invoices", invoices: "invoices",
+  van: "vans", vans: "vans", fleet: "vans",
+  timeoff: "timeOffRequests", "time-off": "timeOffRequests", timeoffrequests: "timeOffRequests",
+  servicerequest: "serviceRequests", servicerequests: "serviceRequests",
+};
+
+function detectEntity(filename: string): string | null {
+  const base = filename.toLowerCase().replace(/\.[^.]+$/, "").replace(/[-_\s]/g, "");
+  if (ENTITY_ALIASES[base]) return ENTITY_ALIASES[base];
+  // Try partial matches (e.g. "employee_list_2024" → "employees")
+  for (const [alias, entity] of Object.entries(ENTITY_ALIASES)) {
+    if (alias.length >= 4 && base.includes(alias)) return entity;
+  }
+  return null;
+}
+
+// Header-based fallback: infer entity from CSV/sheet column headers.
+// Used when filename detection fails. Returns the best-match entity or null.
+function detectEntityFromHeaders(headers: string[]): string | null {
+  const norm = headers.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ""));
+  const has = (...keys: string[]) => keys.some(k => norm.includes(k));
+  const hasAny = (...keys: string[]) => keys.some(k => norm.some(h => h.includes(k)));
+
+  // Strong signals first
+  if (has("invoicenumber", "invoiceno", "invoiceid") || hasAny("invoice") && has("totalamount", "amountdue", "balance")) return "invoices";
+  if (has("salary", "billablerate", "shopdaysusedytd") || (hasAny("employee", "tech", "technician", "staff") && has("role", "salary", "position"))) return "employees";
+  if (has("certifications", "certs") && has("name")) return "employees";
+  if (has("facilitytype", "inspectionfrequency") || (hasAny("customer", "client", "company") && has("contactphone", "phone", "address"))) return "customers";
+  if (has("servicetype", "scheduleddate", "jobnumber", "workorder", "workordernumber")) return "jobs";
+  if ((has("revenue", "amount", "total") && has("customer", "customername", "client")) ) return "jobs";
+  if (has("licenseplate", "make", "model", "gpstrackerid")) return "vans";
+  if (has("requesteddate", "timeofftype")) return "timeOffRequests";
+  return null;
+}
+
+// ─── Editable import grid types ───────────────────────────────────────────────
+
+type EditableSheet = {
+  headers: string[];
+  rows: Record<string, string>[];
+};
+type EditedImport = Record<string, EditableSheet>;
+
+// ─── Import bundle type ───────────────────────────────────────────────────────
+
+type DataBundle = {
+  employees?: unknown[];
+  customers?: unknown[];
+  customerLocations?: unknown[];
+  jobs?: unknown[];
+  openJobs?: unknown[];
+  invoices?: unknown[];
+  vans?: unknown[];
+  timeOffRequests?: unknown[];
+  serviceRequests?: unknown[];
+};
+
+type ImportPreview = DataBundle & {
+  fingerprint: string;
+  fileLabel: string;
+  duplicate: ImportLogEntry | null;
+};
+
+// ─── Download helpers ─────────────────────────────────────────────────────────
+
+function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = filename; a.click();
   URL.revokeObjectURL(url);
 }
 
-function downloadCsv(rows: Record<string, unknown>[], filename: string) {
-  if (!rows.length) { toast.error("No data to export"); return; }
-  const keys = Object.keys(rows[0]);
-  const escape = (v: unknown) => {
-    const s = v == null ? "" : Array.isArray(v) ? v.join("; ") : String(v);
-    return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const csv = [keys.join(","), ...rows.map(r => keys.map(k => escape(r[k])).join(","))].join("\n");
-  const blob = new Blob([csv], { type: "text/csv" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
-  URL.revokeObjectURL(url);
+function downloadCsv(filename: string, content: string) {
+  downloadBlob(filename, new Blob([content], { type: "text/csv" }));
 }
 
-function fmt(n: number) { return n.toLocaleString(); }
-function fmtCurrency(n: number) {
-  return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function downloadJson(filename: string, data: unknown) {
+  downloadBlob(filename, new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
 }
 
-// ─── File Parsers ─────────────────────────────────────────────────────────────
-
-function parseMoney(s: string): number {
-  return parseFloat(s.replace(/[^0-9.-]/g, "")) || 0;
-}
-
-function parseSFDate(s: string): string | null {
-  const m = s.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (!m) return null;
-  return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
-}
-
-function parseAnyDate(s: string): string | null {
-  if (!s) return null;
-  let m = s.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
-  m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-  return null;
-}
-
-function inferServiceType(text: string): string {
-  const t = text.toLowerCase();
-  if (t.includes(" ss") || t.includes("suppression") || t.includes("hood") || t.includes("ansul")) return "hood_suppression";
-  if (t.includes(" fe") || t.includes("extinguisher") || t.includes("fire ext")) return "extinguisher_inspection";
-  if (t.includes("sprinkler") || t.includes("sprk")) return "sprinkler_test";
-  if (t.includes("standpipe")) return "standpipe_test";
-  if (t.includes("backflow") || t.includes(" bfp")) return "backflow_test";
-  if (t.includes("exit light") || t.includes("emergency light")) return "exit_light_check";
-  if (t.includes("fire alarm") || t.includes(" fa ")) return "fire_alarm_test";
-  return "other";
-}
-
-interface ParsedData {
-  employees?: Record<string, unknown>[];
-  customers?: Record<string, unknown>[];
-  customerLocations?: Record<string, unknown>[];
-  jobs?: Record<string, unknown>[];
-  openJobs?: Record<string, unknown>[];
-  invoices?: Record<string, unknown>[];
-}
-
-interface SFParseResult {
-  data: ParsedData;
-  techNames: string[];
-  totalJobs: number;
-  totalRevenue: number;
-  dateRange: string;
-}
-
-/** Parse a ServiceFusion "Sales Revenue By Tech" HTML export */
-function parseSFHtmlReport(html: string): SFParseResult | null {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-
-  const fieldTitles = Array.from(doc.querySelectorAll(".fieldTitle"));
-  const dateRangeEl = fieldTitles.find(el => el.textContent?.trim() === "Date Range");
-  const dateRange = dateRangeEl?.nextElementSibling?.textContent?.trim() ?? "";
-
-  const techNameEls = Array.from(doc.querySelectorAll("table.customerName td"));
-  const rateTables  = Array.from(doc.querySelectorAll("table.rateTable"));
-
-  if (!rateTables.length) return null;
-
-  const employees: Record<string, unknown>[] = [];
-  const customers: Record<string, unknown>[] = [];
-  const jobs:      Record<string, unknown>[] = [];
-  const invoices:  Record<string, unknown>[] = [];
-
-  const custMap = new Map<string, number>();
-  const empMap  = new Map<string, number>();
-  let empId = 1, custId = 1;
-
-  const numSections = Math.min(Math.max(techNameEls.length, 1), rateTables.length);
-
-  for (let ti = 0; ti < numSections; ti++) {
-    const techName = techNameEls[ti]?.textContent?.trim() ?? `Technician ${ti + 1}`;
-
-    if (!empMap.has(techName)) {
-      employees.push({
-        id: empId, name: techName,
-        role: "extinguisher_tech", salary: 50000, billableRate: 800,
-        homeZip: "00000", certifications: [],
-        allowedShopDays: 5, shopDaysUsedYtd: 0,
-        allowedTrainingDays: 3, trainingDaysUsedYtd: 0,
-        utilizationPct: 0, isActive: true,
-      });
-      empMap.set(techName, empId++);
-    }
-    const currentEmpId = empMap.get(techName)!;
-
-    const tbody = rateTables[ti].querySelector("tbody");
-    if (!tbody) continue;
-
-    const rows = Array.from(tbody.querySelectorAll("tr"));
-    let i = 0;
-
-    while (i < rows.length) {
-      const cells = Array.from(rows[i].querySelectorAll("td"));
-      const firstLink = cells[0]?.querySelector("a");
-
-      if (firstLink && /^\d+$/.test(firstLink.textContent?.trim() ?? "")) {
-        const jobNum    = firstLink.textContent?.trim() ?? "";
-        const dateStr   = cells[1]?.textContent?.trim() ?? "";
-        const sfStatus  = cells[3]?.textContent?.trim() ?? "";
-        const custAnchor = cells[6]?.querySelector("a");
-        const customerName = (custAnchor ?? cells[6])?.textContent?.trim() ?? "Unknown";
-        const details   = cells[7]?.textContent?.replace(/\s+/g, " ").trim() ?? "";
-
-        let jobTotal = 0, techTotal = 0;
-        if (i + 1 < rows.length) {
-          const finCells = Array.from(rows[i + 1].querySelectorAll("td"));
-          if (finCells[0]?.textContent?.trim().startsWith("$")) {
-            techTotal = parseMoney(finCells[5]?.textContent ?? "0");
-            jobTotal  = parseMoney(finCells[6]?.textContent ?? "0");
-            i++;
-          }
-        }
-
-        while (i + 1 < rows.length) {
-          const nextTd = rows[i + 1].querySelector("td");
-          const isNote = nextTd?.getAttribute("colspan") ||
-            (rows[i + 1].querySelectorAll("td").length === 1 &&
-             rows[i + 1].textContent?.includes("*"));
-          if (isNote) i++; else break;
-        }
-
-        if (!custMap.has(customerName)) {
-          customers.push({
-            id: custId, name: customerName,
-            facilityType: "commercial", address: "",
-            contactName: "", contactPhone: "",
-            inspectionFrequency: "annual", isActive: true,
-          });
-          custMap.set(customerName, custId++);
-        }
-        const currentCustId = custMap.get(customerName)!;
-
-        const sfDone = ["Invoiced", "Job Closed", "Completed", "Complete", "Closed"];
-        const status = sfDone.includes(sfStatus) ? "completed" : "pending";
-        const invoiceStatus = sfStatus === "Invoiced" ? "sent"
-          : sfStatus === "Job Closed" ? "paid" : "draft";
-
-        const scheduledDate = parseSFDate(dateStr);
-        const serviceType   = inferServiceType(details);
-        const revenue       = jobTotal > 0 ? jobTotal : techTotal;
-        const notes         = [details, `SF#${jobNum}`].filter(Boolean).join(" | ");
-        const jobIdx        = jobs.length;
-
-        jobs.push({
-          id: jobIdx + 1,
-          customerId: currentCustId, employeeId: currentEmpId,
-          serviceType, status, priority: "medium",
-          scheduledDate, dueDate: scheduledDate,
-          revenue, quantity: 1, notes,
-          certificationRequired: "any",
-        });
-
-        if (revenue > 0 && status === "completed") {
-          invoices.push({
-            invoiceNumber: `SF-${jobNum}`,
-            customerId: currentCustId, jobId: null, techId: currentEmpId,
-            lineItems: [{ service: details || serviceType, quantity: 1, rate: revenue, total: revenue }],
-            totalAmount: revenue, status: invoiceStatus,
-            generatedAt: scheduledDate
-              ? new Date(scheduledDate + "T12:00:00").toISOString()
-              : new Date().toISOString(),
-            _jobIdx: jobIdx, // internal: which job this invoice belongs to
-          });
-        }
+async function downloadXlsx(filename: string, sheets: Record<string, Record<string, unknown>[]>) {
+  const XLSX = await import("xlsx");
+  const wb = XLSX.utils.book_new();
+  for (const [name, rows] of Object.entries(sheets)) {
+    if (!rows.length) continue;
+    const clean = rows.map(r => {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(r)) {
+        if (["_id", "_creationTime"].includes(k)) continue;
+        out[k] = typeof v === "object" && v !== null ? JSON.stringify(v) : v;
       }
-      i++;
-    }
-  }
-
-  const totalRevenue = invoices.reduce((s, inv) => s + Number(inv.totalAmount), 0);
-  return {
-    data: { employees, customers, jobs, invoices },
-    techNames: employees.map(e => String(e.name)),
-    totalJobs: jobs.length, totalRevenue, dateRange,
-  };
-}
-
-/** Minimal CSV parser (handles quoted fields) */
-function parseCsvText(text: string): string[][] {
-  const rows: string[][] = [];
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.replace(/\r$/, "");
-    if (!line.trim()) continue;
-    const cells: string[] = [];
-    let inQuote = false, current = "";
-    for (let ci = 0; ci < line.length; ci++) {
-      const c = line[ci];
-      if (c === '"') {
-        if (inQuote && line[ci + 1] === '"') { current += '"'; ci++; }
-        else inQuote = !inQuote;
-      } else if (c === "," && !inQuote) {
-        cells.push(current.trim()); current = "";
-      } else {
-        current += c;
-      }
-    }
-    cells.push(current.trim());
-    rows.push(cells);
-  }
-  return rows;
-}
-
-type CsvEntityType = "employees" | "customers" | "jobs" | "unknown";
-
-function detectCsvType(headers: string[]): CsvEntityType {
-  const h = headers.map(s => s.toLowerCase());
-  const has = (k: string) => h.some(s => s.includes(k));
-  if ((has("salary") || has("billable")) && has("name")) return "employees";
-  if ((has("address") || has("facility")) && has("name") && !has("revenue")) return "customers";
-  if (has("date") || has("revenue") || (has("customer") && has("service"))) return "jobs";
-  return "unknown";
-}
-
-interface CsvParseResult {
-  data: ParsedData;
-  entityType: CsvEntityType;
-  rowCount: number;
-  detectedColumns: string[];
-}
-
-function parseCsvFile(text: string): CsvParseResult | null {
-  const rows = parseCsvText(text);
-  if (rows.length < 2) return null;
-
-  const rawHeaders = rows[0];
-  const headers    = rawHeaders.map(h => h.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, ""));
-  const entityType = detectCsvType(headers);
-  const dataRows   = rows.slice(1).filter(r => r.some(c => c.trim()));
-
-  const get = (row: string[], ...keys: string[]): string => {
-    for (const key of keys) {
-      const idx = headers.findIndex(h => h.includes(key));
-      if (idx >= 0 && idx < row.length && row[idx].trim()) return row[idx].trim();
-    }
-    return "";
-  };
-
-  if (entityType === "employees") {
-    const employees = dataRows.map((row, i) => ({
-      id: i + 1,
-      name: get(row, "name", "employee"),
-      role: get(row, "role", "title", "position") || "extinguisher_tech",
-      salary: parseMoney(get(row, "salary", "annual")) || 50000,
-      billableRate: parseMoney(get(row, "billable", "rate", "daily")) || 800,
-      homeZip: get(row, "zip", "postal") || "00000",
-      certifications: [], allowedShopDays: 5, shopDaysUsedYtd: 0,
-      allowedTrainingDays: 3, trainingDaysUsedYtd: 0,
-      utilizationPct: 0, isActive: true,
-    })).filter(e => e.name);
-    return { data: { employees }, entityType, rowCount: employees.length, detectedColumns: rawHeaders };
-  }
-
-  if (entityType === "customers") {
-    const customers = dataRows.map((row, i) => ({
-      id: i + 1,
-      name: get(row, "name", "company", "customer"),
-      facilityType: get(row, "facility", "type") || "commercial",
-      address: get(row, "address", "street", "location") || "",
-      contactName: get(row, "contact_name", "contact", "manager") || "",
-      contactPhone: get(row, "phone", "tel", "mobile") || "",
-      contactEmail: get(row, "email") || null,
-      inspectionFrequency: get(row, "frequency", "inspection") || "annual",
-      isActive: true,
-    })).filter(c => c.name);
-    return { data: { customers }, entityType, rowCount: customers.length, detectedColumns: rawHeaders };
-  }
-
-  // Jobs CSV
-  const custMap = new Map<string, number>();
-  const empMap  = new Map<string, number>();
-  const customers: Record<string, unknown>[] = [];
-  const employees: Record<string, unknown>[] = [];
-  const jobs:      Record<string, unknown>[] = [];
-  const invoices:  Record<string, unknown>[] = [];
-  let custId = 1, empId = 1;
-
-  for (const row of dataRows) {
-    const custName  = get(row, "customer", "client", "company");
-    const empName   = get(row, "tech", "technician", "employee", "assigned");
-    const dateStr   = get(row, "date", "scheduled", "service_date", "job_date");
-    const revStr    = get(row, "revenue", "total", "amount", "price", "job_total");
-    const statusStr = get(row, "status").toLowerCase();
-    const serviceStr = get(row, "service", "type", "category");
-    const notes     = get(row, "notes", "description", "details", "job_details");
-
-    if (!custName && !dateStr && !revStr) continue;
-
-    if (custName && !custMap.has(custName)) {
-      customers.push({ id: custId, name: custName, facilityType: "commercial", address: "", contactName: "", contactPhone: "", inspectionFrequency: "annual", isActive: true });
-      custMap.set(custName, custId++);
-    }
-    if (empName && !empMap.has(empName)) {
-      employees.push({ id: empId, name: empName, role: "extinguisher_tech", salary: 50000, billableRate: 800, homeZip: "00000", certifications: [], allowedShopDays: 5, shopDaysUsedYtd: 0, allowedTrainingDays: 3, trainingDaysUsedYtd: 0, utilizationPct: 0, isActive: true });
-      empMap.set(empName, empId++);
-    }
-
-    const sfDone = ["invoiced", "job closed", "completed", "complete", "done", "closed", "paid"];
-    const status = sfDone.includes(statusStr) ? "completed" : "pending";
-    const scheduledDate = parseAnyDate(dateStr);
-    const revenue = parseMoney(revStr);
-    const jobIdx = jobs.length;
-
-    jobs.push({
-      id: jobIdx + 1,
-      customerId: custName ? custMap.get(custName)! : 0,
-      employeeId: empName ? empMap.get(empName)! : null,
-      serviceType: inferServiceType(serviceStr + " " + notes),
-      status, priority: "medium",
-      scheduledDate, dueDate: scheduledDate,
-      revenue, quantity: 1,
-      notes: notes || null,
-      certificationRequired: "any",
+      return out;
     });
-
-    if (revenue > 0 && status === "completed") {
-      invoices.push({
-        invoiceNumber: `CSV-${Date.now()}-${jobs.length}`,
-        customerId: custName ? custMap.get(custName)! : 0,
-        jobId: null,
-        techId: empName ? empMap.get(empName)! : null,
-        lineItems: [{ service: serviceStr || "Service", quantity: 1, rate: revenue, total: revenue }],
-        totalAmount: revenue, status: "sent",
-        generatedAt: scheduledDate
-          ? new Date(scheduledDate + "T12:00:00").toISOString()
-          : new Date().toISOString(),
-        _jobIdx: jobIdx,
-      });
-    }
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(clean), name.slice(0, 31));
   }
-
-  const data: ParsedData = {};
-  if (employees.length) data.employees = employees;
-  if (customers.length) data.customers = customers;
-  if (jobs.length) data.jobs = jobs;
-  if (invoices.length) data.invoices = invoices;
-
-  return { data, entityType: "jobs", rowCount: jobs.length, detectedColumns: rawHeaders };
+  XLSX.writeFile(wb, filename);
 }
 
-type FileFormat = "json" | "sf-html" | "csv";
+// ─── Entity config ────────────────────────────────────────────────────────────
 
-function detectFormat(filename: string, text: string): FileFormat {
-  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
-  if (ext === "json") return "json";
-  if (ext === "html" || ext === "htm") return "sf-html";
-  if (ext === "csv") return "csv";
-  if (text.trimStart().startsWith("{") || text.trimStart().startsWith("[")) return "json";
-  if (text.includes("rateTable") || text.includes("customerName") || text.includes("servicefusion")) return "sf-html";
-  return "csv";
-}
-
-// ─── Confirm Dialog ───────────────────────────────────────────────────────────
-
-function ConfirmDialog({
-  open, title, description, confirmLabel, danger, onConfirm, onCancel,
-}: {
-  open: boolean; title: string; description: string;
-  confirmLabel: string; danger?: boolean;
-  onConfirm: () => void; onCancel: () => void;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={o => !o && onCancel()}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle className={`flex items-center gap-2 ${danger ? "text-destructive" : ""}`}>
-            {danger ? <AlertTriangle className="size-5" /> : <Info className="size-5" />}
-            {title}
-          </DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
-        <div className="flex justify-end gap-2 pt-2">
-          <Button variant="outline" onClick={onCancel}>Cancel</Button>
-          <Button variant={danger ? "destructive" : "default"} onClick={onConfirm}>{confirmLabel}</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ─── Demo Data Tab ────────────────────────────────────────────────────────────
-
-function clearLocalStorage() {
-  const keys = Object.keys(localStorage).filter(k => k.startsWith("tfpro_"));
-  keys.forEach(k => localStorage.removeItem(k));
-}
-
-function resetLicenseSeed() {
-  Object.keys(localStorage)
-    .filter(k => k.startsWith("tfpro_licenses_seeded"))
-    .forEach(k => localStorage.removeItem(k));
-}
-
-function DemoDataTab() {
-  const [seeding,   setSeeding]   = useState(false);
-  const [clearing,  setClearing]  = useState(false);
-  const [clearStep, setClearStep] = useState<0 | 1 | 2>(0);
-  const [lastSeed,  setLastSeed]  = useState<string[] | null>(null);
-
-  async function handleSeed() {
-    setSeeding(true);
-    try {
-      const result = await adminSeedDemo();
-      resetLicenseSeed();
-      setLastSeed([
-        ...result.seeded.employees,
-        ...result.seeded.customers,
-        `${result.seeded.jobs} jobs`,
-        `${result.seeded.invoices} invoices`,
-        `${result.seeded.locations} locations`,
-      ]);
-      toast.success("Demo data loaded! All pages are now populated.");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to seed demo data");
-    } finally {
-      setSeeding(false);
-    }
-  }
-
-  async function handleClearAll() {
-    setClearStep(0);
-    setClearing(true);
-    try {
-      await adminClearAll();
-      clearLocalStorage();
-      setLastSeed(null);
-      toast.success("All data cleared. The slate is clean — ready for real data.");
-    } catch {
-      toast.error("Failed to clear data");
-    } finally {
-      setClearing(false);
-    }
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="rounded-xl border border-blue-500/30 bg-blue-500/5 p-4 text-sm text-blue-700 dark:text-blue-300 flex gap-3">
-        <Info className="size-4 shrink-0 mt-0.5" />
-        <div>
-          <p className="font-semibold mb-1">Training Mode</p>
-          <p>Load sample employees, customers, jobs, and invoices to explore all features before entering real data. When ready, use "Clear All Data" to start fresh.</p>
-        </div>
-      </div>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Play className="size-4 text-emerald-600" /> Load Demo Data
-          </CardTitle>
-          <CardDescription>
-            Adds 3 employees, 3 customers (with 3 locations each), 6 jobs, and 3 invoices to populate dashboards, analytics, and P&L views.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {[
-              { icon: Users,     label: "Employees", desc: "Ernest McKinley (tech), Tyler Beaumont (supervisor), Ephraim Osei (tech)" },
-              { icon: Building2, label: "Customers",  desc: "Harbor View Condominiums, Riverside Elementary, Gold Coast Restaurant Group" },
-              { icon: Briefcase, label: "Jobs & Invoices", desc: "6 jobs (3 completed, 3 pending) + 3 invoices across all customers" },
-            ].map(({ icon: Icon, label, desc }) => (
-              <div key={label} className="rounded-lg border bg-muted/30 p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <Icon className="size-3.5 text-primary" />
-                  <span className="text-xs font-semibold">{label}</span>
-                </div>
-                <p className="text-[11px] text-muted-foreground">{desc}</p>
-              </div>
-            ))}
-          </div>
-
-          {lastSeed && (
-            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
-              <div className="flex items-center gap-2 mb-2 text-emerald-700 dark:text-emerald-400">
-                <CheckCircle2 className="size-4" />
-                <span className="text-xs font-semibold">Demo data loaded</span>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {lastSeed.map(s => (
-                  <Badge key={s} variant="secondary" className="text-[10px]">{s}</Badge>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <Button onClick={handleSeed} disabled={seeding} className="gap-2">
-            {seeding ? <RefreshCw className="size-4 animate-spin" /> : <Play className="size-4" />}
-            {seeding ? "Loading…" : "Load Demo Data"}
-          </Button>
-        </CardContent>
-      </Card>
-
-      <Card className="border-destructive/30">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2 text-destructive">
-            <Trash2 className="size-4" /> Clear All Data
-          </CardTitle>
-          <CardDescription>
-            Permanently removes all employees, customers, jobs, invoices, and related records. This cannot be undone.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Button variant="destructive" onClick={() => setClearStep(1)} disabled={clearing} className="gap-2">
-            {clearing ? <RefreshCw className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-            {clearing ? "Clearing…" : "Clear All Data"}
-          </Button>
-        </CardContent>
-      </Card>
-
-      <ConfirmDialog open={clearStep === 1} title="Clear All Data?" danger
-        description="This will permanently delete ALL employees, customers, jobs, invoices, and related records from the database, AND clear all locally cached data. This cannot be undone."
-        confirmLabel="Yes, I want to clear everything"
-        onConfirm={() => setClearStep(2)} onCancel={() => setClearStep(0)} />
-      <ConfirmDialog open={clearStep === 2} title="Final Warning — Are You Absolutely Sure?" danger
-        description="You are about to permanently erase all data. There is no undo, no backup, and no recovery."
-        confirmLabel="Delete Everything"
-        onConfirm={handleClearAll} onCancel={() => setClearStep(0)} />
-    </div>
-  );
-}
-
-// ─── Export Tab ───────────────────────────────────────────────────────────────
-
-function ExportTab() {
-  const [exporting, setExporting] = useState(false);
-  const [data, setData] = useState<AdminExportData | null>(null);
-
-  async function fetchExport() {
-    setExporting(true);
-    try { const r = await adminExport(); setData(r); return r; }
-    catch { toast.error("Export failed"); return null; }
-    finally { setExporting(false); }
-  }
-
-  async function exportAll() {
-    const result = await fetchExport();
-    if (!result) return;
-    downloadJson(result, `techforce-export-${new Date().toISOString().slice(0, 10)}.json`);
-    toast.success("Full export downloaded");
-  }
-
-  async function exportEntity(key: keyof AdminExportData["data"], filename: string) {
-    let source = data;
-    if (!source) {
-      setExporting(true);
-      try { source = await adminExport(); setData(source); }
-      catch { toast.error("Export failed"); setExporting(false); return; }
-      finally { setExporting(false); }
-    }
-    const rows = source.data[key] as unknown as Record<string, unknown>[];
-    if (!rows?.length) { toast("No data to export for this entity"); return; }
-    downloadCsv(rows, filename);
-    toast.success(`${filename} downloaded`);
-  }
-
-  const entities: { key: keyof AdminExportData["data"]; label: string; icon: React.ComponentType<{ className?: string }>; filename: string }[] = [
-    { key: "employees",         label: "Employees",          icon: Users,      filename: "employees.csv" },
-    { key: "customers",         label: "Customers",          icon: Building2,  filename: "customers.csv" },
-    { key: "customerLocations", label: "Customer Locations", icon: Building2,  filename: "customer-locations.csv" },
-    { key: "jobs",              label: "Jobs",               icon: Briefcase,  filename: "jobs.csv" },
-    { key: "openJobs",          label: "Open Jobs",          icon: Briefcase,  filename: "open-jobs.csv" },
-    { key: "invoices",          label: "Invoices",           icon: FileText,   filename: "invoices.csv" },
-    { key: "recurringSchedules",label: "Recurring Schedules",icon: RefreshCw,  filename: "recurring-schedules.csv" },
-  ];
-
-  return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <FileJson className="size-4 text-blue-600" /> Full System Export
-          </CardTitle>
-          <CardDescription>Downloads a single JSON file with all data for backup or migration.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {data && (
-            <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
-              <span className="font-semibold text-foreground">Snapshot ready — </span>
-              {Object.entries(data.data).map(([k, v]) => `${fmt(v.length)} ${k}`).join(" · ")}
-            </div>
-          )}
-          <Button onClick={exportAll} disabled={exporting} className="gap-2">
-            {exporting ? <RefreshCw className="size-4 animate-spin" /> : <Download className="size-4" />}
-            {exporting ? "Preparing…" : "Export All (JSON)"}
-          </Button>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Download className="size-4 text-emerald-600" /> Export by Type (CSV)
-          </CardTitle>
-          <CardDescription>Download individual CSV files compatible with Excel and Google Sheets.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {entities.map(({ key, label, icon: Icon, filename }) => (
-              <button key={key} onClick={() => exportEntity(key, filename)} disabled={exporting}
-                className="flex items-center gap-2.5 rounded-lg border bg-muted/20 hover:bg-muted/50 px-3 py-2.5 text-left transition-colors disabled:opacity-50"
-              >
-                <Icon className="size-3.5 text-primary shrink-0" />
-                <div>
-                  <div className="text-xs font-semibold">{label}</div>
-                  <div className="text-[10px] text-muted-foreground">{filename}</div>
-                </div>
-                <Download className="size-3 text-muted-foreground ml-auto shrink-0" />
-              </button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-// ─── Import Preview (editable table) ─────────────────────────────────────────
-
-const SERVICE_OPTS = [
-  { v: "hood_suppression",        l: "Hood Suppression" },
-  { v: "extinguisher_inspection", l: "Extinguisher" },
-  { v: "sprinkler_test",          l: "Sprinkler Test" },
-  { v: "standpipe_test",          l: "Standpipe" },
-  { v: "backflow_test",           l: "Backflow" },
-  { v: "exit_light_check",        l: "Exit Lights" },
-  { v: "fire_alarm_test",         l: "Fire Alarm" },
-  { v: "other",                   l: "Other" },
+const CSV_ENTITIES = [
+  { key: "employees",        label: "Employees",      icon: Users },
+  { key: "customers",        label: "Customers",      icon: Building2 },
+  { key: "jobs",             label: "Jobs",           icon: Briefcase },
+  { key: "invoices",         label: "Invoices",       icon: FileText },
+  { key: "vans",             label: "Fleet / Vans",   icon: Car },
+  { key: "timeOffRequests",  label: "Time-Off Requests", icon: Clock },
+  { key: "serviceRequests",  label: "Service Requests", icon: ClipboardList },
 ] as const;
-
-const JOB_STATUS_OPTS = [
-  { v: "completed", l: "Completed" },
-  { v: "pending",   l: "Pending" },
-  { v: "cancelled", l: "Cancelled" },
-] as const;
-
-const INV_STATUS_OPTS = [
-  { v: "paid",    l: "Paid" },
-  { v: "sent",    l: "Sent" },
-  { v: "draft",   l: "Draft" },
-  { v: "overdue", l: "Overdue" },
-] as const;
-
-const ROLE_OPTS = [
-  { v: "extinguisher_tech",  l: "Extinguisher Tech" },
-  { v: "suppression_lead",   l: "Suppression Lead" },
-  { v: "sprinkler_tech",     l: "Sprinkler Tech" },
-  { v: "helper",             l: "Helper" },
-  { v: "admin",              l: "Admin" },
-  { v: "supervisor",         l: "Supervisor" },
-] as const;
-
-interface PRow {
-  idx:           number;
-  date:          string | null;
-  custName:      string;
-  empName:       string;
-  serviceType:   string;
-  revenue:       number;
-  jobStatus:     string;
-  invoiceStatus: string;
-  notes:         string;
-  customerId:    number;
-  employeeId:    number | null;
-}
-
-interface PEmp {
-  id:           number;
-  name:         string;
-  role:         string;
-  salary:       number;
-  billableRate: number;
-}
-
-// Thin cell select — no shadcn Select to keep table performance fast
-function CellSelect({ value, options, onChange, className }: {
-  value: string;
-  options: readonly { v: string; l: string }[];
-  onChange: (v: string) => void;
-  className?: string;
-}) {
-  return (
-    <select
-      value={value}
-      onChange={e => onChange(e.target.value)}
-      className={`h-7 w-full rounded border border-input bg-background px-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring ${className ?? ""}`}
-    >
-      {options.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
-    </select>
-  );
-}
-
-function CellMoney({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  return (
-    <div className="relative">
-      <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">$</span>
-      <input
-        type="number"
-        min={0}
-        step={0.01}
-        value={value}
-        onChange={e => onChange(parseFloat(e.target.value) || 0)}
-        className="h-7 w-24 rounded border border-input bg-background pl-4 pr-1 text-xs text-right focus:outline-none focus:ring-1 focus:ring-ring"
-      />
-    </div>
-  );
-}
-
-function ImportPreview({
-  rawData, sfResult, csvResult, onBack, onImport, isImporting,
-}: {
-  rawData:    ParsedData;
-  sfResult:   SFParseResult | null;
-  csvResult:  CsvParseResult | null;
-  onBack:     () => void;
-  onImport:   (data: ParsedData, clearFirst: boolean) => void;
-  isImporting: boolean;
-}) {
-  // Build name lookup maps
-  const custById = useMemo(() => {
-    const m = new Map<number, string>();
-    rawData.customers?.forEach(c => m.set(Number(c.id), String(c.name)));
-    return m;
-  }, [rawData.customers]);
-
-  const empById = useMemo(() => {
-    const m = new Map<number, string>();
-    rawData.employees?.forEach(e => m.set(Number(e.id), String(e.name)));
-    return m;
-  }, [rawData.employees]);
-
-  const invByJobIdx = useMemo(() => {
-    const m = new Map<number, number>();
-    rawData.invoices?.forEach((inv, ii) => {
-      const ji = Number((inv as Record<string, unknown>)._jobIdx ?? -1);
-      if (ji >= 0) m.set(ji, ii);
-    });
-    return m;
-  }, [rawData.invoices]);
-
-  // Editable rows
-  const [rows, setRows] = useState<PRow[]>(() =>
-    (rawData.jobs ?? []).map((j, idx) => {
-      const invIdx = invByJobIdx.get(idx) ?? -1;
-      const inv = invIdx >= 0 ? rawData.invoices?.[invIdx] as Record<string, unknown> | undefined : undefined;
-      return {
-        idx,
-        date:          j.scheduledDate ? String(j.scheduledDate) : null,
-        custName:      custById.get(Number(j.customerId)) ?? "Unknown",
-        empName:       j.employeeId != null ? (empById.get(Number(j.employeeId)) ?? "—") : "—",
-        serviceType:   String(j.serviceType ?? "other"),
-        revenue:       Number(j.revenue ?? 0),
-        jobStatus:     String(j.status ?? "pending"),
-        invoiceStatus: String(inv?.status ?? "draft"),
-        notes:         j.notes ? String(j.notes) : "",
-        customerId:    Number(j.customerId),
-        employeeId:    j.employeeId != null ? Number(j.employeeId) : null,
-      };
-    })
-  );
-
-  // Editable employees
-  const [employees, setEmployees] = useState<PEmp[]>(() =>
-    (rawData.employees ?? []).map(e => ({
-      id:           Number(e.id),
-      name:         String(e.name),
-      role:         String(e.role ?? "extinguisher_tech"),
-      salary:       Number(e.salary ?? 50000),
-      billableRate: Number(e.billableRate ?? 800),
-    }))
-  );
-
-  const [filter,      setFilter]      = useState("");
-  const [clearFirst,  setClearFirst]  = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-
-  // Editable column headers
-  const [colLabels, setColLabels] = useState<Record<string, string>>({
-    date:        "# Date",
-    customer:    "Customer / Tech",
-    serviceType: "Service Type",
-    revenue:     "Revenue",
-    jobStatus:   "Job Status",
-    invoice:     "Invoice",
-    notes:       "Notes",
-  });
-  const [editingCol, setEditingCol] = useState<string | null>(null);
-  const [colEditVal, setColEditVal] = useState("");
-
-  // Bulk operation state
-  const [bulkDate,   setBulkDate]   = useState("");
-  const [bulkStatus, setBulkStatus] = useState("");
-
-  // Next unique idx for new rows
-  const nextIdx = useMemo(() =>
-    rows.length > 0 ? Math.max(...rows.map(r => r.idx)) + 1 : 0,
-    [rows]
-  );
-
-  // ─── Filtered rows ──────────────────────────────────────────────────────────
-  const visibleRows = useMemo(() => {
-    if (!filter.trim()) return rows;
-    const q = filter.toLowerCase();
-    return rows.filter(r =>
-      r.custName.toLowerCase().includes(q) ||
-      (r.date ?? "").includes(q) ||
-      r.empName.toLowerCase().includes(q) ||
-      r.serviceType.includes(q) ||
-      r.notes.toLowerCase().includes(q)
-    );
-  }, [rows, filter]);
-
-  // ─── Live totals ────────────────────────────────────────────────────────────
-  const totalRevenue  = useMemo(() => rows.reduce((s, r) => s + r.revenue, 0), [rows]);
-  const completedJobs = useMemo(() => rows.filter(r => r.jobStatus === "completed").length, [rows]);
-  const invoiceTotal  = useMemo(() => rows.filter(r => r.jobStatus === "completed").reduce((s, r) => s + r.revenue, 0), [rows]);
-  const uniqueCustomers = useMemo(() => new Set(rows.map(r => r.custName).filter(Boolean)).size, [rows]);
-
-  // ─── Row mutations ──────────────────────────────────────────────────────────
-  function updateRow(idx: number, field: keyof PRow, value: unknown) {
-    setRows(prev => prev.map(r => r.idx === idx ? { ...r, [field]: value } : r));
-  }
-
-  function updateEmp(id: number, field: keyof PEmp, value: unknown) {
-    setEmployees(prev => prev.map(e => e.id === id ? { ...e, [field]: value } : e));
-  }
-
-  function addRow() {
-    setRows(prev => [...prev, {
-      idx: nextIdx,
-      date: null, custName: "", empName: "—",
-      serviceType: "extinguisher_inspection",
-      revenue: 0, jobStatus: "pending", invoiceStatus: "draft", notes: "",
-      customerId: 0, employeeId: null,
-    }]);
-  }
-
-  function deleteRow(idx: number) {
-    setRows(prev => prev.filter(r => r.idx !== idx));
-  }
-
-  // ─── Bulk operations ─────────────────────────────────────────────────────────
-  function bulkApply(patch: Partial<PRow>) {
-    const idxSet = new Set(visibleRows.map(r => r.idx));
-    setRows(prev => prev.map(r => idxSet.has(r.idx) ? { ...r, ...patch } : r));
-  }
-
-  function bulkSetServiceType(svcType: string) { bulkApply({ serviceType: svcType }); }
-  function bulkSetStatus(status: string)        { bulkApply({ jobStatus: status }); }
-  function applyBulkDate()  { if (bulkDate)   bulkApply({ date: bulkDate }); }
-
-  // ─── Column header editing ───────────────────────────────────────────────────
-  function startColEdit(key: string) {
-    setEditingCol(key);
-    setColEditVal(colLabels[key] ?? key);
-  }
-  function commitColEdit() {
-    if (editingCol) setColLabels(prev => ({ ...prev, [editingCol]: colEditVal.trim() || prev[editingCol] }));
-    setEditingCol(null);
-  }
-
-  // ─── Import handler ──────────────────────────────────────────────────────────
-  function handleImport() {
-    setShowConfirm(false);
-
-    // Rebuild unique customers from edited rows
-    const custMap = new Map<string, number>();
-    let nextCustId = 1;
-    rawData.customers?.forEach(c => {
-      const name = String(c.name);
-      if (!custMap.has(name)) { custMap.set(name, Number(c.id)); nextCustId = Math.max(nextCustId, Number(c.id) + 1); }
-    });
-    rows.forEach(r => { if (r.custName && !custMap.has(r.custName)) custMap.set(r.custName, nextCustId++); });
-
-    const updatedCustomers = Array.from(custMap.entries()).map(([name, id]) => {
-      const existing = rawData.customers?.find(c => String(c.name) === name);
-      return existing ?? { id, name, facilityType: "commercial", address: "", contactName: "", contactPhone: "", inspectionFrequency: "annual", isActive: true };
-    });
-
-    // Rebuild unique employees from edited rows
-    const empNameToId = new Map<string, number>(employees.map(e => [e.name, e.id]));
-    let nextEmpId = employees.length > 0 ? Math.max(...employees.map(e => e.id)) + 1 : 1;
-    rows.forEach(r => {
-      const n = r.empName === "—" ? "" : r.empName;
-      if (n && !empNameToId.has(n)) empNameToId.set(n, nextEmpId++);
-    });
-
-    const updatedEmployees: Record<string, unknown>[] = employees.map(e => ({
-      ...(rawData.employees?.find(re => Number(re.id) === e.id) ?? {}),
-      id: e.id, name: e.name, role: e.role, salary: e.salary, billableRate: e.billableRate,
-    }));
-    rows.forEach(r => {
-      const n = r.empName === "—" ? "" : r.empName;
-      if (n && !employees.find(e => e.name === n)) {
-        const id = empNameToId.get(n)!;
-        updatedEmployees.push({ id, name: n, role: "extinguisher_tech", salary: 50000, billableRate: 800, homeZip: "00000", certifications: [], allowedShopDays: 5, shopDaysUsedYtd: 0, allowedTrainingDays: 3, trainingDaysUsedYtd: 0, utilizationPct: 0, isActive: true });
-      }
-    });
-
-    const updatedJobs: Record<string, unknown>[] = rows.map((r, ji) => {
-      const custId = r.custName ? (custMap.get(r.custName) ?? 0) : (r.customerId || 0);
-      const eName = r.empName === "—" ? "" : r.empName;
-      const empId = eName ? (empNameToId.get(eName) ?? r.employeeId) : r.employeeId;
-      return {
-        ...(rawData.jobs?.[r.idx] ?? {}),
-        id: ji + 1, customerId: custId, employeeId: empId,
-        serviceType: r.serviceType, status: r.jobStatus,
-        revenue: r.revenue, scheduledDate: r.date, dueDate: r.date,
-        notes: r.notes || null, priority: "medium", quantity: 1, certificationRequired: "any",
-      };
-    });
-
-    const updatedInvoices: Record<string, unknown>[] = rows
-      .filter(r => r.jobStatus === "completed" && r.revenue > 0)
-      .map((r, ii) => {
-        const custId = r.custName ? (custMap.get(r.custName) ?? 0) : (r.customerId || 0);
-        const eName = r.empName === "—" ? "" : r.empName;
-        const empId = eName ? (empNameToId.get(eName) ?? r.employeeId) : r.employeeId;
-        return {
-          invoiceNumber: `IMP-${Date.now()}-${ii + 1}`,
-          customerId: custId, jobId: null, techId: empId,
-          lineItems: [{ service: r.serviceType, quantity: 1, rate: r.revenue, total: r.revenue }],
-          totalAmount: r.revenue, status: r.invoiceStatus,
-          generatedAt: r.date ? new Date(r.date + "T12:00:00").toISOString() : new Date().toISOString(),
-        };
-      });
-
-    onImport({ employees: updatedEmployees, customers: updatedCustomers as Record<string, unknown>[], jobs: updatedJobs, invoices: updatedInvoices }, clearFirst);
-  }
-
-  // ─── Editable col-header helper ──────────────────────────────────────────────
-  function ColHeader({ colKey, className }: { colKey: string; className?: string }) {
-    return editingCol === colKey ? (
-      <input
-        autoFocus
-        value={colEditVal}
-        onChange={e => setColEditVal(e.target.value)}
-        onBlur={commitColEdit}
-        onKeyDown={e => { if (e.key === "Enter") commitColEdit(); if (e.key === "Escape") setEditingCol(null); }}
-        className={`h-5 text-xs bg-background border border-primary rounded px-1 focus:outline-none ${className ?? ""}`}
-        style={{ minWidth: 60 }}
-      />
-    ) : (
-      <span
-        className="cursor-pointer hover:text-primary group inline-flex items-center gap-0.5"
-        title="Click to rename column"
-        onClick={() => startColEdit(colKey)}
-      >
-        {colLabels[colKey]}
-        <span className="opacity-0 group-hover:opacity-40 text-[9px]">✎</span>
-      </span>
-    );
-  }
-
-  const hasJobs      = rows.length > 0;
-  const hasEmployees = employees.length > 0;
-
-  return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="font-semibold text-base">Review & Edit Before Importing</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Edit any cell, rename column headers by clicking them, use bulk-set controls to update multiple rows at once.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={onBack} className="gap-1.5 shrink-0">
-          <ArrowLeft className="size-3.5" /> Back
-        </Button>
-      </div>
-
-      {/* Source summary strip */}
-      {(sfResult || csvResult) && (
-        <div className="rounded-lg border bg-muted/20 px-4 py-2.5 flex flex-wrap gap-x-6 gap-y-1.5 text-xs">
-          {sfResult && <>
-            <span><span className="text-muted-foreground">Tech: </span><span className="font-semibold">{sfResult.techNames.join(", ")}</span></span>
-            {sfResult.dateRange && <span><span className="text-muted-foreground">Period: </span><span className="font-semibold">{sfResult.dateRange}</span></span>}
-          </>}
-          {csvResult && <span><span className="text-muted-foreground">Format: </span><span className="font-semibold">CSV ({csvResult.entityType})</span></span>}
-          <span><span className="text-muted-foreground">Jobs: </span><span className="font-semibold">{fmt(rows.length)}</span></span>
-          <span><span className="text-muted-foreground">Customers: </span><span className="font-semibold">{fmt(uniqueCustomers)}</span></span>
-        </div>
-      )}
-
-      {/* Live stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        {[
-          { label: "Total Jobs",    value: fmt(rows.length),         icon: Briefcase,    color: "text-blue-600" },
-          { label: "Completed",     value: fmt(completedJobs),        icon: CheckCircle2, color: "text-emerald-600" },
-          { label: "Total Revenue", value: fmtCurrency(totalRevenue), icon: DollarSign,   color: "text-emerald-600" },
-          { label: "Invoice Value", value: fmtCurrency(invoiceTotal), icon: FileText,     color: "text-primary" },
-        ].map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className="rounded-lg border bg-muted/10 p-3">
-            <div className="flex items-center gap-1.5 mb-1">
-              <Icon className={`size-3.5 ${color}`} />
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wide">{label}</span>
-            </div>
-            <div className="font-semibold text-sm">{value}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Employees section */}
-      {hasEmployees && (
-        <Card>
-          <CardHeader className="pb-2 pt-3 px-4">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <Users className="size-3.5 text-primary" />
-              Technicians / Employees ({employees.length})
-              <span className="text-[10px] text-muted-foreground font-normal ml-1">— set correct role & pay before importing</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 pb-3">
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b text-muted-foreground">
-                    <th className="text-left pb-2 pr-3 font-medium w-44">Name</th>
-                    <th className="text-left pb-2 pr-3 font-medium w-48">Role</th>
-                    <th className="text-left pb-2 pr-3 font-medium w-36">Annual Salary</th>
-                    <th className="text-left pb-2 font-medium w-36">Daily Bill Rate</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {employees.map(emp => (
-                    <tr key={emp.id} className="border-b last:border-0">
-                      <td className="py-2.5 pr-3">
-                        <input
-                          type="text"
-                          value={emp.name}
-                          onChange={e => updateEmp(emp.id, "name", e.target.value)}
-                          className="h-8 w-full rounded border border-input bg-background px-2 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-ring"
-                        />
-                      </td>
-                      <td className="py-2.5 pr-3">
-                        <CellSelect value={emp.role} options={ROLE_OPTS} onChange={v => updateEmp(emp.id, "role", v)} className="h-8 w-full" />
-                      </td>
-                      <td className="py-2.5 pr-3">
-                        <div className="relative">
-                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">$</span>
-                          <input type="number" min={0} step={1000} value={emp.salary}
-                            onChange={e => updateEmp(emp.id, "salary", Number(e.target.value) || 0)}
-                            className="h-8 w-32 rounded border border-input bg-background pl-5 pr-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                          />
-                        </div>
-                      </td>
-                      <td className="py-2.5">
-                        <div className="relative">
-                          <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">$</span>
-                          <input type="number" min={0} step={50} value={emp.billableRate}
-                            onChange={e => updateEmp(emp.id, "billableRate", Number(e.target.value) || 0)}
-                            className="h-8 w-28 rounded border border-input bg-background pl-5 pr-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                          />
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Jobs table */}
-      {hasJobs && (
-        <Card>
-          <CardHeader className="pb-2 pt-3 px-4">
-            <div className="flex items-start justify-between gap-3 flex-wrap">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <Briefcase className="size-3.5 text-primary" />
-                Jobs ({fmt(rows.length)})
-                {filter && visibleRows.length !== rows.length && (
-                  <Badge variant="secondary" className="text-[10px]">{fmt(visibleRows.length)} shown</Badge>
-                )}
-              </CardTitle>
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-muted-foreground" />
-                <Input
-                  placeholder="Filter rows…"
-                  value={filter}
-                  onChange={e => setFilter(e.target.value)}
-                  className="h-8 pl-6 text-xs w-40"
-                />
-              </div>
-            </div>
-
-            {/* Bulk operations bar */}
-            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-muted-foreground font-medium shrink-0">
-                Bulk set{filter ? " filtered" : " all"} rows →
-              </span>
-              <CellSelect
-                value=""
-                options={[{ v: "", l: "— service type —" }, ...SERVICE_OPTS]}
-                onChange={v => { if (v) bulkSetServiceType(v); }}
-                className="h-8 w-40"
-              />
-              <CellSelect
-                value=""
-                options={[{ v: "", l: "— job status —" }, ...JOB_STATUS_OPTS]}
-                onChange={v => { if (v) bulkSetStatus(v); }}
-                className="h-8 w-36"
-              />
-              <div className="flex items-center gap-1">
-                <input
-                  type="date"
-                  value={bulkDate}
-                  onChange={e => setBulkDate(e.target.value)}
-                  className="h-8 rounded border border-input bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-                <Button size="sm" variant="outline" className="h-8 text-xs px-2.5" onClick={applyBulkDate} disabled={!bulkDate}>
-                  Set date
-                </Button>
-              </div>
-            </div>
-          </CardHeader>
-
-          <CardContent className="px-0 pb-0">
-            <div className="overflow-x-auto">
-              <div className="overflow-y-auto" style={{ maxHeight: "min(60vh, 560px)" }}>
-                <table className="w-full text-xs border-collapse">
-                  <thead className="sticky top-0 z-10 bg-muted/90 backdrop-blur-sm">
-                    <tr className="border-b">
-                      <th className="text-left px-3 py-3 font-medium text-muted-foreground w-36">
-                        <ColHeader colKey="date" />
-                      </th>
-                      <th className="text-left px-2 py-3 font-medium text-muted-foreground">
-                        <ColHeader colKey="customer" />
-                      </th>
-                      <th className="text-left px-2 py-3 font-medium text-muted-foreground w-40">
-                        <ColHeader colKey="serviceType" />
-                      </th>
-                      <th className="text-right px-2 py-3 font-medium text-muted-foreground w-32">
-                        <ColHeader colKey="revenue" />
-                      </th>
-                      <th className="text-left px-2 py-3 font-medium text-muted-foreground w-32">
-                        <ColHeader colKey="jobStatus" />
-                      </th>
-                      <th className="text-left px-2 py-3 font-medium text-muted-foreground w-28">
-                        <ColHeader colKey="invoice" />
-                      </th>
-                      <th className="text-left px-2 py-3 font-medium text-muted-foreground">
-                        <ColHeader colKey="notes" />
-                      </th>
-                      <th className="w-8 px-1 py-3" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleRows.map((row, vi) => (
-                      <tr key={row.idx}
-                        className={`border-b last:border-0 hover:bg-muted/30 transition-colors ${vi % 2 === 1 ? "bg-muted/10" : ""}`}
-                      >
-                        {/* Date — editable */}
-                        <td className="px-3 py-2.5 whitespace-nowrap">
-                          <span className="text-[10px] text-muted-foreground block leading-none mb-1">#{row.idx + 1}</span>
-                          <input
-                            type="date"
-                            value={row.date ?? ""}
-                            onChange={e => updateRow(row.idx, "date", e.target.value || null)}
-                            className="h-8 rounded border border-input bg-background px-2 text-xs w-full focus:outline-none focus:ring-1 focus:ring-ring"
-                          />
-                        </td>
-                        {/* Customer + Tech — editable */}
-                        <td className="px-2 py-2.5 max-w-[200px]">
-                          <input
-                            type="text"
-                            value={row.custName}
-                            onChange={e => updateRow(row.idx, "custName", e.target.value)}
-                            className="h-8 text-xs font-medium rounded border border-input bg-background px-2 w-full focus:outline-none focus:ring-1 focus:ring-ring"
-                            placeholder="Customer name…"
-                          />
-                          <input
-                            type="text"
-                            value={row.empName === "—" ? "" : row.empName}
-                            onChange={e => updateRow(row.idx, "empName", e.target.value || "—")}
-                            className="h-7 mt-1 text-[10px] text-muted-foreground rounded border border-input/60 bg-background px-2 w-full focus:outline-none focus:ring-1 focus:ring-ring"
-                            placeholder="Technician…"
-                          />
-                        </td>
-                        {/* Service Type */}
-                        <td className="px-2 py-2.5">
-                          <CellSelect
-                            value={row.serviceType}
-                            options={SERVICE_OPTS}
-                            onChange={v => updateRow(row.idx, "serviceType", v)}
-                            className="h-8"
-                          />
-                        </td>
-                        {/* Revenue */}
-                        <td className="px-2 py-2.5">
-                          <div className="relative">
-                            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">$</span>
-                            <input
-                              type="number"
-                              min={0}
-                              step={0.01}
-                              value={row.revenue}
-                              onChange={e => updateRow(row.idx, "revenue", parseFloat(e.target.value) || 0)}
-                              className="h-8 w-28 rounded border border-input bg-background pl-5 pr-2 text-xs text-right focus:outline-none focus:ring-1 focus:ring-ring"
-                            />
-                          </div>
-                        </td>
-                        {/* Job Status */}
-                        <td className="px-2 py-2.5">
-                          <CellSelect
-                            value={row.jobStatus}
-                            options={JOB_STATUS_OPTS}
-                            onChange={v => updateRow(row.idx, "jobStatus", v)}
-                            className="h-8"
-                          />
-                        </td>
-                        {/* Invoice Status */}
-                        <td className="px-2 py-2.5">
-                          {row.jobStatus === "completed" ? (
-                            <CellSelect
-                              value={row.invoiceStatus}
-                              options={INV_STATUS_OPTS}
-                              onChange={v => updateRow(row.idx, "invoiceStatus", v)}
-                              className="h-8"
-                            />
-                          ) : (
-                            <span className="text-muted-foreground text-[10px]">—</span>
-                          )}
-                        </td>
-                        {/* Notes — editable */}
-                        <td className="px-2 py-2.5 min-w-[140px]">
-                          <input
-                            type="text"
-                            value={row.notes}
-                            onChange={e => updateRow(row.idx, "notes", e.target.value)}
-                            className="h-8 text-xs text-muted-foreground rounded border border-input/60 bg-background px-2 w-full focus:outline-none focus:ring-1 focus:ring-ring"
-                            placeholder="Notes…"
-                          />
-                        </td>
-                        {/* Delete row */}
-                        <td className="px-1 py-2.5 text-center">
-                          <button
-                            onClick={() => deleteRow(row.idx)}
-                            className="size-7 rounded flex items-center justify-center text-muted-foreground/40 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors mx-auto"
-                            title="Delete row"
-                          >
-                            <X className="size-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    {visibleRows.length === 0 && rows.length > 0 && (
-                      <tr>
-                        <td colSpan={8} className="px-3 py-8 text-center text-xs text-muted-foreground">
-                          No rows match "{filter}"
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Table footer */}
-            <div className="border-t px-4 py-2.5 flex items-center justify-between text-xs bg-muted/20">
-              <div className="flex items-center gap-3">
-                <span className="text-muted-foreground">
-                  {fmt(completedJobs)} of {fmt(rows.length)} completed
-                </span>
-                <button
-                  onClick={addRow}
-                  className="flex items-center gap-1 text-primary font-medium hover:underline"
-                >
-                  <span className="text-base leading-none">+</span> Add row
-                </button>
-              </div>
-              <span className="font-semibold tabular-nums">
-                Total: {fmtCurrency(totalRevenue)}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Customers summary */}
-      {uniqueCustomers > 0 && (
-        <Card>
-          <CardHeader className="pb-2 pt-3 px-4">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <Building2 className="size-3.5 text-primary" />
-              Customers ({uniqueCustomers} unique)
-              <span className="text-[10px] text-muted-foreground font-normal ml-1">— names are taken from the Customer column above; edit cells to correct them</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 pb-3">
-            <div className="flex flex-wrap gap-1.5">
-              {Array.from(new Set(rows.map(r => r.custName).filter(Boolean))).slice(0, 50).map(name => (
-                <Badge key={name} variant="outline" className="text-[10px] font-normal">{name}</Badge>
-              ))}
-              {uniqueCustomers > 50 && (
-                <Badge variant="secondary" className="text-[10px]">+{uniqueCustomers - 50} more</Badge>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Footer action bar */}
-      <div className="sticky bottom-0 -mx-1 rounded-xl border bg-background/95 backdrop-blur-sm px-4 py-3 flex items-center justify-between gap-4 shadow-lg">
-        <div className="flex items-center gap-2">
-          <Checkbox id="clearFirst2" checked={clearFirst} onCheckedChange={v => setClearFirst(v === true)} />
-          <Label htmlFor="clearFirst2" className="text-sm cursor-pointer">
-            Clear existing data first
-          </Label>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground hidden sm:block">
-            {fmt(rows.length)} jobs · {fmt(uniqueCustomers)} customers · {fmtCurrency(invoiceTotal)} invoiced
-          </span>
-          <Button onClick={() => setShowConfirm(true)} disabled={isImporting || rows.length === 0} className="gap-2">
-            {isImporting ? <RefreshCw className="size-4 animate-spin" /> : <Upload className="size-4" />}
-            {isImporting ? "Importing…" : `Import ${fmt(rows.length)} Jobs`}
-          </Button>
-        </div>
-      </div>
-
-      <ConfirmDialog
-        open={showConfirm}
-        title={clearFirst ? "Clear & Import?" : "Confirm Import"}
-        description={`This will import ${fmt(rows.length)} jobs, ${fmt(uniqueCustomers)} customers, and ${fmt(employees.length)} employee(s)${clearFirst ? " — and CLEAR all existing data first" : ""}.`}
-        confirmLabel={clearFirst ? "Clear & Import" : "Import"}
-        danger={clearFirst}
-        onConfirm={handleImport}
-        onCancel={() => setShowConfirm(false)}
-      />
-    </div>
-  );
-}
-
-// ─── Import Tab ───────────────────────────────────────────────────────────────
-
-const FORMAT_INFO = {
-  json: {
-    label: "TechForce JSON", icon: FileJson, accept: ".json", color: "text-blue-600",
-    description: "Full system export from this app. All entities restored with ID remapping.",
-  },
-  "sf-html": {
-    label: "ServiceFusion Report", icon: FileCode2, accept: ".html,.htm", color: "text-orange-600",
-    description: "\"Sales Revenue By Tech\" HTML export from ServiceFusion. Extracts jobs, customers, and invoices.",
-  },
-  csv: {
-    label: "Spreadsheet (CSV)", icon: TableProperties, accept: ".csv", color: "text-emerald-600",
-    description: "Employees, customers, or jobs CSV. Column headers are auto-detected.",
-  },
-} as const;
-
-function ImportTab() {
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [selectedFormat, setSelectedFormat] = useState<FileFormat>("sf-html");
-  const [parsed,         setParsed]         = useState<ParsedData | null>(null);
-  const [sfResult,       setSfResult]       = useState<SFParseResult | null>(null);
-  const [csvResult,      setCsvResult]      = useState<CsvParseResult | null>(null);
-  const [filename,       setFilename]       = useState<string | null>(null);
-  const [importing,      setImporting]      = useState(false);
-  const [error,          setError]          = useState<string | null>(null);
-  const [mode,           setMode]           = useState<"upload" | "preview">("upload");
-
-  function resetFile() {
-    setParsed(null); setSfResult(null); setCsvResult(null);
-    setFilename(null); setError(null); setMode("upload");
-    if (fileRef.current) fileRef.current.value = "";
-  }
-
-  function handleFormatChange(fmt: FileFormat) {
-    setSelectedFormat(fmt);
-    resetFile();
-  }
-
-  function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setFilename(file.name);
-    setError(null);
-    setParsed(null); setSfResult(null); setCsvResult(null); setMode("upload");
-
-    const reader = new FileReader();
-    reader.onload = ev => {
-      try {
-        const text = ev.target?.result as string;
-        const detected = detectFormat(file.name, text);
-
-        if (detected === "json") {
-          const json = JSON.parse(text);
-          const data = json.data ?? json;
-          if (typeof data !== "object") throw new Error("Invalid format");
-          setParsed(data as ParsedData);
-          setMode("preview");
-        } else if (detected === "sf-html") {
-          const result = parseSFHtmlReport(text);
-          if (!result) throw new Error("Could not find job data in this file. Make sure it is a ServiceFusion 'Sales Revenue By Tech' report.");
-          setSfResult(result);
-          setParsed(result.data);
-          setMode("preview");
-        } else if (detected === "csv") {
-          const result = parseCsvFile(text);
-          if (!result || !Object.keys(result.data).length) throw new Error("No recognisable data found. Check that your CSV has headers and data rows.");
-          setCsvResult(result);
-          setParsed(result.data);
-          setMode("preview");
-        } else {
-          throw new Error("Unrecognised file format. Please upload a .json, .html, or .csv file.");
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not parse file.");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  async function handleImport(data: ParsedData, clearFirst: boolean) {
-    setImporting(true);
-    try {
-      const result = await adminImport(data as Record<string, unknown[]>, clearFirst);
-      const summary = Object.entries(result.imported).map(([k, v]) => `${v} ${k}`).join(", ");
-      toast.success(`Import complete: ${summary || "no records"}`);
-      resetFile();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Import failed");
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  // ── Preview mode ──────────────────────────────────────────────────────────
-  if (mode === "preview" && parsed) {
-    return (
-      <ImportPreview
-        rawData={parsed}
-        sfResult={sfResult}
-        csvResult={csvResult}
-        onBack={resetFile}
-        onImport={handleImport}
-        isImporting={importing}
-      />
-    );
-  }
-
-  // ── Upload mode ───────────────────────────────────────────────────────────
-  return (
-    <div className="space-y-6">
-      {/* Format selector */}
-      <div className="grid gap-2 sm:grid-cols-3">
-        {(Object.entries(FORMAT_INFO) as [FileFormat, typeof FORMAT_INFO[FileFormat]][]).map(([key, info]) => {
-          const Icon = info.icon;
-          const active = selectedFormat === key;
-          return (
-            <button key={key} onClick={() => handleFormatChange(key)}
-              className={`rounded-lg border p-3 text-left transition-all ${active ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:bg-muted/40"}`}
-            >
-              <div className="flex items-center gap-2 mb-1">
-                <Icon className={`size-4 ${info.color}`} />
-                <span className="text-xs font-semibold">{info.label}</span>
-                {active && <ChevronRight className="size-3 text-primary ml-auto" />}
-              </div>
-              <p className="text-[10px] text-muted-foreground">{info.description}</p>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Drop zone */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Upload className="size-4 text-primary" /> Upload {FORMAT_INFO[selectedFormat].label}
-          </CardTitle>
-          <CardDescription>
-            {selectedFormat === "sf-html" && "Export from ServiceFusion: Reports → Sales Revenue → By Tech → Save Page As HTML."}
-            {selectedFormat === "csv"     && "Supports employees, customers, or jobs. Column headers are auto-detected."}
-            {selectedFormat === "json"    && "Upload a JSON file previously exported from TechForce Pro."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div
-            className="border-2 border-dashed rounded-lg p-10 text-center cursor-pointer hover:border-primary/50 hover:bg-muted/30 transition-colors"
-            onClick={() => fileRef.current?.click()}
-          >
-            {(() => { const Icon = FORMAT_INFO[selectedFormat].icon; return <Icon className={`size-10 mx-auto mb-2 opacity-30 ${FORMAT_INFO[selectedFormat].color}`} />; })()}
-            <p className="text-sm font-medium">
-              {filename ? `✓ ${filename} — parsing…` : `Click to select ${FORMAT_INFO[selectedFormat].accept.split(",").join(" / ")} file`}
-            </p>
-            <p className="text-xs text-muted-foreground mt-1">or drag and drop here</p>
-            <input ref={fileRef} type="file" accept={FORMAT_INFO[selectedFormat].accept} className="hidden" onChange={handleFile} />
-          </div>
-
-          {error && (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive flex gap-2">
-              <AlertTriangle className="size-4 shrink-0 mt-0.5" /> {error}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* CSV format guide */}
-      {selectedFormat === "csv" && (
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <Info className="size-3.5 text-muted-foreground" /> Supported CSV Column Names
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-xs text-muted-foreground">
-            {[
-              { label: "Employees", cols: "Name, Role, Salary, Billable Rate, ZIP" },
-              { label: "Customers", cols: "Name, Address, Contact Name, Phone, Email, Facility Type" },
-              { label: "Jobs",      cols: "Date, Customer, Tech / Employee, Service, Revenue, Status, Notes" },
-            ].map(({ label, cols }) => (
-              <div key={label}><span className="font-semibold text-foreground">{label}:</span> {cols}</div>
-            ))}
-            <p className="text-[10px] pt-1">Headers are matched by keyword — exact names aren't required. Status values "Invoiced", "Job Closed", "Completed" map to completed jobs.</p>
-          </CardContent>
-        </Card>
-      )}
-    </div>
-  );
-}
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function DataManagementPage() {
+  const [loading, setLoading]               = useState<string | null>(null);
+  const [confirmClear, setConfirmClear]     = useState<0 | 1 | 2>(0);
+  const [importPreview, setImportPreview]   = useState<ImportPreview | null>(null);
+  const [clearFirst, setClearFirst]         = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Editable import grid state ────────────────────────────────────────────
+  const [editedImport,  setEditedImport]    = useState<EditedImport>({});
+  const [editingSheet,  setEditingSheet]    = useState<string>("");
+  const [editingCell,   setEditingCell]     = useState<{ row: number; col: string } | null>(null);
+  const [editingHeader, setEditingHeader]   = useState<string | null>(null);
+
+  // Sync editable grid when preview changes
+  useEffect(() => {
+    if (!importPreview) { setEditedImport({}); setEditingSheet(""); return; }
+    const SKIP = new Set(["fingerprint", "fileLabel", "duplicate"]);
+    const sheets: EditedImport = {};
+    for (const [key, val] of Object.entries(importPreview)) {
+      if (SKIP.has(key) || !Array.isArray(val) || !val.length) continue;
+      const hdrs = Object.keys(val[0] as Record<string, unknown>)
+        .filter(k => !["_id", "_creationTime"].includes(k));
+      sheets[key] = {
+        headers: hdrs,
+        rows: val.map(r => {
+          const rec = r as Record<string, unknown>;
+          const row: Record<string, string> = {};
+          // Displayed columns
+          for (const h of hdrs) row[h] = String(rec[h] ?? "");
+          // Keep _id hidden (not a displayed header) so foreign-key linking survives import
+          if (rec["_id"] !== undefined) row["_id"] = String(rec["_id"]);
+          return row;
+        }),
+      };
+    }
+    setEditedImport(sheets);
+    setEditingSheet(Object.keys(sheets)[0] ?? "");
+  }, [importPreview]);
+
+  const seedDemo   = useMutation(api.admin.seedDemo);
+  const clearAll   = useMutation(api.admin.clearAll);
+  const importAll  = useMutation(api.admin.importAll);
+  const exportData = useQuery(api.admin.exportAll);
+
+  // ── Demo: seed ──────────────────────────────────────────────────────────────
+  async function handleSeed() {
+    setLoading("seed");
+    try {
+      const result = await seedDemo({}) as { seeded?: { employees?: number; customers?: number; jobs?: number } };
+      toast.success(
+        `Demo data loaded — ${result?.seeded?.employees ?? 0} employees, ${result?.seeded?.customers ?? 0} customers, ${result?.seeded?.jobs ?? 0} jobs`
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to seed demo data");
+    } finally { setLoading(null); }
+  }
+
+  // ── Demo: clear all ─────────────────────────────────────────────────────────
+  async function handleClear() {
+    setLoading("clear");
+    try {
+      await clearAll({});
+      // Also wipe P&L localStorage so the P&L page shows zeroes immediately
+      try {
+        localStorage.removeItem("pl-day-overrides");
+        localStorage.removeItem("pl-rev-overrides");
+        localStorage.removeItem("pl-week-start");
+        localStorage.removeItem("pl-period");
+        localStorage.removeItem(IMPORT_LOG_KEY);
+      } catch {}
+      toast.success("All data cleared successfully");
+      setConfirmClear(0);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to clear data");
+    } finally { setLoading(null); }
+  }
+
+  // ── Export ──────────────────────────────────────────────────────────────────
+  function handleExportJson() {
+    if (!exportData) return;
+    downloadJson(`techforce-export-${new Date().toISOString().slice(0, 10)}.json`, exportData);
+    toast.success("Full JSON export downloaded");
+  }
+
+  function handleExportXlsx() {
+    if (!exportData) return;
+    const d = (exportData as { data?: Record<string, Record<string, unknown>[]> }).data ?? {};
+    downloadXlsx(`techforce-export-${new Date().toISOString().slice(0, 10)}.xlsx`, d as Record<string, Record<string, unknown>[]>);
+    toast.success("Excel workbook downloaded — one sheet per entity");
+  }
+
+  function handleExportCsv(entityKey: string, label: string) {
+    if (!exportData) return;
+    const d = (exportData as { data?: Record<string, unknown[]> }).data ?? {};
+    const rows = d[entityKey] as Record<string, unknown>[] | undefined;
+    if (!rows?.length) { toast.warning(`No ${label} data to export`); return; }
+    downloadCsv(`techforce-${entityKey}-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows));
+    toast.success(`${label} CSV downloaded (${rows.length} rows)`);
+  }
+
+  // ── Import: parse file ──────────────────────────────────────────────────────
+  function buildPreview(bundle: DataBundle, fingerprint: string, fileLabel: string): ImportPreview {
+    return {
+      ...bundle,
+      fingerprint,
+      fileLabel,
+      duplicate: checkDuplicate(fingerprint),
+    };
+  }
+
+  function parseJsonFile(text: string, fileLabel: string) {
+    const raw = JSON.parse(text);
+    const d: DataBundle = raw.data ?? raw;
+    setImportPreview(buildPreview(d, makeFingerprint(text), fileLabel));
+  }
+
+  function parseCsvFile(text: string, filename: string) {
+    const rows = parseCsv(text);
+    if (!rows.length) { toast.error("CSV has no data rows"); return; }
+    const headers = Object.keys(rows[0] ?? {});
+    const entity = detectEntity(filename) ?? detectEntityFromHeaders(headers);
+    if (!entity) {
+      toast.error(`Can't detect entity from "${filename}" or its columns (${headers.slice(0,5).join(", ")}…). Rename file to employees.csv / customers.csv / jobs.csv / invoices.csv, or include a recognizable column.`);
+      return;
+    }
+    toast.success(`Detected as ${entity} (${rows.length} rows)`);
+    const bundle: DataBundle = { [entity]: rows };
+    setImportPreview(buildPreview(bundle, makeFingerprint(text), filename));
+  }
+
+  function parseXlsxFile(buffer: ArrayBuffer, filename: string) {
+    import("xlsx").then(XLSX => {
+      const wb = XLSX.read(buffer, { type: "array" });
+      const bundle: Record<string, Record<string, unknown>[]> = {};
+      const detections: string[] = [];
+      const skipped: string[] = [];
+      for (const sheetName of wb.SheetNames) {
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[sheetName]);
+        if (!rows.length) continue;
+        const headers = Object.keys(rows[0] ?? {});
+        const entity =
+          detectEntity(sheetName) ??
+          detectEntity(filename) ??
+          detectEntityFromHeaders(headers);
+        if (!entity) { skipped.push(sheetName); continue; }
+        if (bundle[entity]) bundle[entity].push(...rows);
+        else bundle[entity] = rows;
+        detections.push(`${sheetName} → ${entity} (${rows.length})`);
+      }
+      if (detections.length) toast.success(`Detected sheets: ${detections.join("; ")}`);
+      if (skipped.length) toast.warning(`Skipped unrecognized sheet(s): ${skipped.join(", ")}`);
+      if (!Object.keys(bundle).length) {
+        toast.error("No recognisable entity sheets found in the workbook.");
+        return;
+      }
+      const fp = makeFingerprint(filename + JSON.stringify(Object.keys(bundle)) + JSON.stringify(
+        Object.values(bundle).map(a => a.length)
+      ));
+      setImportPreview(buildPreview(bundle, fp, filename));
+    }).catch(() => toast.error("Failed to load Excel parser"));
+  }
+
+  function parseHtmlFile(text: string, filename: string) {
+    // ServiceFusion "Sales Revenue By Tech" HTML — specialized two-row-per-job parser
+    if (isServiceFusionReport(text)) {
+      const bundle = parseServiceFusionSalesByTech(text);
+      const totalJobs = bundle.jobs?.length ?? 0;
+      const totalCusts = bundle.customers?.length ?? 0;
+      if (!totalJobs) {
+        toast.error("ServiceFusion report parsed but no job rows found. Check the file format.");
+        return;
+      }
+      toast.success(`ServiceFusion report detected — ${totalJobs} jobs, ${totalCusts} customers extracted`);
+      setImportPreview(buildPreview(bundle, makeFingerprint(text), filename));
+      return;
+    }
+    // Generic HTML table fallback
+    const entity = detectEntity(filename);
+    const rows = parseHtmlTable(text);
+    if (!rows.length) { toast.error("No table found in HTML file"); return; }
+    const bundle: DataBundle = { [(entity ?? "employees")]: rows };
+    setImportPreview(buildPreview(bundle, makeFingerprint(text), filename));
+  }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    e.target.value = "";
+
+    if (ext === "json") {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try { parseJsonFile(ev.target?.result as string, file.name); }
+        catch { toast.error("Invalid JSON file"); setImportPreview(null); }
+      };
+      reader.readAsText(file);
+    } else if (ext === "csv") {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try { parseCsvFile(ev.target?.result as string, file.name); }
+        catch { toast.error("Invalid CSV file"); setImportPreview(null); }
+      };
+      reader.readAsText(file);
+    } else if (ext === "xlsx" || ext === "xls") {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try { parseXlsxFile(ev.target?.result as ArrayBuffer, file.name); }
+        catch { toast.error("Invalid Excel file"); setImportPreview(null); }
+      };
+      reader.readAsArrayBuffer(file);
+    } else if (ext === "html" || ext === "htm") {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try { parseHtmlFile(ev.target?.result as string, file.name); }
+        catch { toast.error("Invalid HTML file"); setImportPreview(null); }
+      };
+      reader.readAsText(file);
+    } else {
+      toast.error("Unsupported file type. Use JSON, CSV, Excel (.xlsx), or HTML.");
+    }
+  }
+
+  // ── Import: confirm (uses editedImport so in-grid changes are preserved) ──
+  async function handleImport() {
+    if (!importPreview) return;
+    setLoading("import");
+    try {
+      const data: DataBundle = {};
+      for (const [key, sheet] of Object.entries(editedImport)) {
+        (data as Record<string, unknown[]>)[key] = sheet.rows.map(row => {
+          const obj: Record<string, unknown> = {};
+          // Iterate ALL row keys — includes hidden _id needed for FK linking
+          for (const [h, v] of Object.entries(row)) {
+            const n = Number(v);
+            obj[h] = v !== "" && !isNaN(n) ? n : v;
+          }
+          return obj;
+        });
+      }
+      const result = await importAll({ data: data as Parameters<typeof importAll>[0]["data"], clearFirst }) as { imported?: Record<string, number> };
+      const imp = result?.imported ?? {};
+      const summary = Object.entries(imp).map(([k, n]) => `${n} ${k}`).join(", ");
+      toast.success(`Import complete — ${summary || "no records"}`);
+      recordImport(importPreview.fingerprint, importPreview.fileLabel);
+      setImportPreview(null);
+      setClearFirst(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Import failed");
+    } finally { setLoading(null); }
+  }
+
+  // ── Editable grid helpers ────────────────────────────────────────────────
+  function renameHeader(sheetKey: string, idx: number, newName: string) {
+    setEditedImport(prev => {
+      const sheet = { ...prev[sheetKey] };
+      const old = sheet.headers[idx];
+      if (!newName.trim() || newName === old) return prev;
+      sheet.headers = sheet.headers.map((h, i) => i === idx ? newName : h);
+      sheet.rows = sheet.rows.map(r => {
+        const nr = { ...r, [newName]: r[old] };
+        delete nr[old];
+        return nr;
+      });
+      return { ...prev, [sheetKey]: sheet };
+    });
+  }
+
+  function updateCell(sheetKey: string, rowIdx: number, col: string, val: string) {
+    setEditedImport(prev => {
+      const sheet = { ...prev[sheetKey] };
+      sheet.rows = sheet.rows.map((r, i) => i === rowIdx ? { ...r, [col]: val } : r);
+      return { ...prev, [sheetKey]: sheet };
+    });
+  }
+
+  function deleteRow(sheetKey: string, rowIdx: number) {
+    setEditedImport(prev => {
+      const sheet = { ...prev[sheetKey] };
+      sheet.rows = sheet.rows.filter((_, i) => i !== rowIdx);
+      return { ...prev, [sheetKey]: sheet };
+    });
+  }
+
+  function addRow(sheetKey: string) {
+    setEditedImport(prev => {
+      const sheet = { ...prev[sheetKey] };
+      const blank = Object.fromEntries(sheet.headers.map(h => [h, ""]));
+      sheet.rows = [...sheet.rows, blank];
+      return { ...prev, [sheetKey]: sheet };
+    });
+  }
+
+  // ─── Preview entity counts ────────────────────────────────────────────────
+  const previewCounts: [string, number][] = importPreview
+    ? [
+        ["Employees",  importPreview.employees?.length       ?? 0],
+        ["Customers",  importPreview.customers?.length       ?? 0],
+        ["Locations",  importPreview.customerLocations?.length ?? 0],
+        ["Jobs",       importPreview.jobs?.length            ?? 0],
+        ["Open Jobs",  importPreview.openJobs?.length        ?? 0],
+        ["Invoices",   importPreview.invoices?.length        ?? 0],
+        ["Vans",       importPreview.vans?.length            ?? 0],
+        ["Time-Off",   importPreview.timeOffRequests?.length ?? 0],
+        ["Requests",   importPreview.serviceRequests?.length ?? 0],
+      ].filter(([, n]) => (n as number) > 0) as [string, number][]
+    : [];
+
+  // ─── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="space-y-6 max-w-5xl">
+    <div className="space-y-6 max-w-4xl">
       <div>
-        <h1 className="text-2xl md:text-3xl font-bold tracking-tight flex items-center gap-2">
-          <Database className="size-6 text-primary shrink-0" />
-          Data Management
+        <h1 className="text-2xl font-bold flex items-center gap-2">
+          <Database className="size-6 text-primary" /> Data Management
         </h1>
-        <p className="text-muted-foreground mt-1 text-sm">
-          Import from ServiceFusion or CSV, export backups, and manage demo data.
+        <p className="text-muted-foreground text-sm mt-1">
+          Seed demo data, export records, import backups, or clear the database.
         </p>
       </div>
 
-      <Tabs defaultValue="import">
-        <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="demo"   className="gap-1.5"><Package  className="size-3.5" /> Demo Data</TabsTrigger>
+      <Tabs defaultValue="demo">
+        <TabsList className="mb-4">
+          <TabsTrigger value="demo"   className="gap-1.5"><Play className="size-3.5" /> Demo Data</TabsTrigger>
           <TabsTrigger value="export" className="gap-1.5"><Download className="size-3.5" /> Export</TabsTrigger>
-          <TabsTrigger value="import" className="gap-1.5"><Upload   className="size-3.5" /> Import</TabsTrigger>
+          <TabsTrigger value="import" className="gap-1.5"><Upload className="size-3.5" /> Import</TabsTrigger>
         </TabsList>
-        <TabsContent value="demo"   className="mt-6"><DemoDataTab /></TabsContent>
-        <TabsContent value="export" className="mt-6"><ExportTab /></TabsContent>
-        <TabsContent value="import" className="mt-6"><ImportTab /></TabsContent>
+
+        {/* ── Demo Data tab ── */}
+        <TabsContent value="demo" className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Play className="size-4 text-emerald-600" /> Load Demo Data
+              </CardTitle>
+              <CardDescription>
+                Seeds 3 employees, 3 customers (3 locations each), 6 jobs, 3 invoices, and 4 fleet vans.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: "Employees", desc: "Ernest, Tyler, Ephraim" },
+                  { label: "Customers", desc: "Harbor View, Riverside, Gold Coast" },
+                  { label: "Jobs, Invoices & Vans", desc: "6 jobs · 3 invoices · 4 vans" },
+                ].map(item => (
+                  <div key={item.label} className="rounded-lg bg-muted/50 border p-3">
+                    <p className="text-xs font-semibold">{item.label}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{item.desc}</p>
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={handleSeed}
+                disabled={loading === "seed"}
+                className="flex items-center gap-2 bg-emerald-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+              >
+                {loading === "seed"
+                  ? <div className="size-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  : <Play className="size-4" />}
+                {loading === "seed" ? "Loading…" : "Load Demo Data"}
+              </button>
+            </CardContent>
+          </Card>
+
+          <Card className="border-red-200 dark:border-red-800">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2 text-red-700 dark:text-red-400">
+                <Trash2 className="size-4" /> Clear All Data
+              </CardTitle>
+              <CardDescription>
+                Permanently deletes every record from every table. This cannot be undone.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {confirmClear === 0 && (
+                <button
+                  onClick={() => setConfirmClear(1)}
+                  className="flex items-center gap-2 bg-red-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-red-700 transition-colors"
+                >
+                  <Trash2 className="size-4" /> Clear All Data
+                </button>
+              )}
+
+              {confirmClear === 1 && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 p-4 space-y-3">
+                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-2">
+                    <AlertTriangle className="size-4 shrink-0" /> Step 1 of 2 — Are you sure?
+                  </p>
+                  <p className="text-xs text-amber-700 dark:text-amber-400">
+                    This will permanently delete <strong>all employees, customers, jobs, invoices, vans, and every other record</strong>. Your P&L settings will also be reset. This cannot be undone.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setConfirmClear(2)}
+                      className="flex items-center gap-2 bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-amber-700 transition-colors"
+                    >
+                      <AlertTriangle className="size-3.5" /> Yes, I understand — continue
+                    </button>
+                    <button
+                      onClick={() => setConfirmClear(0)}
+                      className="px-4 py-2 rounded-lg text-sm font-medium border hover:bg-muted transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {confirmClear === 2 && (
+                <div className="rounded-lg border border-red-400 bg-red-50 dark:bg-red-950/30 dark:border-red-800 p-4 space-y-3">
+                  <p className="text-sm font-semibold text-red-700 dark:text-red-400 flex items-center gap-2">
+                    <AlertTriangle className="size-4 shrink-0" /> Step 2 of 2 — Final confirmation
+                  </p>
+                  <p className="text-xs text-red-600 dark:text-red-400">
+                    <strong>Last chance.</strong> Every record in the database will be permanently erased. There is no backup or undo.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleClear}
+                      disabled={loading === "clear"}
+                      className="flex items-center gap-2 bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-red-800 disabled:opacity-50 transition-colors"
+                    >
+                      {loading === "clear"
+                        ? <div className="size-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        : <Trash2 className="size-3.5" />}
+                      {loading === "clear" ? "Clearing…" : "Permanently delete everything"}
+                    </button>
+                    <button
+                      onClick={() => setConfirmClear(0)}
+                      className="px-4 py-2 rounded-lg text-sm font-medium border hover:bg-muted transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ── Export tab ── */}
+        <TabsContent value="export" className="space-y-4">
+          {/* Full exports */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <FileJson className="size-4 text-blue-600" /> Full Data Export
+              </CardTitle>
+              <CardDescription>
+                Download a complete snapshot of all data — employees, customers, jobs, invoices, fleet, time-off and more.
+                Use the JSON file to re-import data exactly, or open the Excel workbook in Excel/Google Sheets.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-3">
+              <button
+                onClick={handleExportJson}
+                disabled={!exportData}
+                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              >
+                <FileJson className="size-4" />
+                {exportData ? "Export All (JSON)" : "Loading…"}
+              </button>
+              <button
+                onClick={handleExportXlsx}
+                disabled={!exportData}
+                className="flex items-center gap-2 bg-emerald-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+              >
+                <FileSpreadsheet className="size-4" />
+                {exportData ? "Export All (Excel)" : "Loading…"}
+              </button>
+            </CardContent>
+          </Card>
+
+          {/* Per-entity CSV */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Download className="size-4 text-violet-600" /> Per-Entity CSV Downloads
+              </CardTitle>
+              <CardDescription>
+                Download individual tables as CSV. Name files are auto-detected on re-import (e.g. employees.csv, jobs.csv).
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {CSV_ENTITIES.map(({ key, label, icon: Icon }) => {
+                  const d = (exportData as { data?: Record<string, unknown[]> } | undefined)?.data;
+                  const count = d ? (d[key]?.length ?? 0) : null;
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => handleExportCsv(key, label)}
+                      disabled={!exportData || count === 0}
+                      className="flex flex-col items-center gap-2 p-4 rounded-xl border hover:bg-muted/50 disabled:opacity-40 transition-colors text-center"
+                    >
+                      <Icon className="size-5 text-muted-foreground" />
+                      <span className="text-xs font-medium">{label}</span>
+                      {count !== null && (
+                        <Badge variant="secondary" className="text-[10px] h-4 px-1.5">
+                          {count} rows
+                        </Badge>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ── Import tab ── */}
+        <TabsContent value="import" className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Upload className="size-4 text-amber-600" /> Import Data
+              </CardTitle>
+              <CardDescription>
+                Supported formats: <strong>JSON</strong> (full export), <strong>Excel</strong> (.xlsx / .xls — one sheet per entity),
+                <strong> CSV</strong> (filename must match entity: employees.csv, jobs.csv, invoices.csv…),
+                <strong> HTML</strong> (must contain a &lt;table&gt;). Foreign-key relationships are re-mapped automatically.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <input
+                type="file"
+                accept=".json,.csv,.xlsx,.xls,.html,.htm"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                className="hidden"
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="flex flex-col items-center gap-2 border-2 border-dashed border-muted-foreground/30 rounded-xl px-6 py-6 text-sm text-muted-foreground hover:border-primary/50 hover:text-foreground transition-colors w-full"
+              >
+                <Upload className="size-5" />
+                <span>Click to choose a file</span>
+                <span className="text-xs opacity-60">JSON · Excel (.xlsx) · CSV · HTML</span>
+              </button>
+
+              {/* ── Editable Preview ── */}
+              {importPreview && (
+                <div className="space-y-4 rounded-xl border bg-muted/30 p-4">
+
+                  {/* Duplicate warning */}
+                  {importPreview.duplicate && (
+                    <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3">
+                      <AlertTriangle className="size-4 text-amber-600 shrink-0 mt-0.5" />
+                      <div className="text-sm">
+                        <p className="font-semibold text-amber-700">This file has already been imported</p>
+                        <p className="text-amber-600 text-xs mt-0.5">
+                          Last imported {new Date(importPreview.duplicate.importedAt).toLocaleString()}.
+                          Importing again creates duplicates unless "Clear existing data" is checked.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Header row */}
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <p className="text-sm font-semibold flex items-center gap-1.5">
+                      <CheckCircle2 className="size-4 text-emerald-600" />
+                      {importPreview.fileLabel}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Click any cell or column header to edit before saving.
+                    </p>
+                  </div>
+
+                  {/* Entity tabs */}
+                  {Object.keys(editedImport).length > 0 ? (
+                    <>
+                      {Object.keys(editedImport).length > 1 && (
+                        <div className="flex gap-1.5 flex-wrap">
+                          {Object.keys(editedImport).map(key => (
+                            <button
+                              key={key}
+                              onClick={() => { setEditingSheet(key); setEditingCell(null); setEditingHeader(null); }}
+                              className={`px-3 py-1 text-xs font-medium rounded-lg border transition-colors ${
+                                editingSheet === key
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "bg-background border-muted-foreground/20 hover:bg-muted"
+                              }`}
+                            >
+                              {key} <span className="opacity-60">({editedImport[key].rows.length})</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Editable spreadsheet */}
+                      {editingSheet && editedImport[editingSheet] && (
+                        <div className="rounded-xl border overflow-auto max-h-72 bg-background">
+                          <table className="text-xs w-full border-collapse">
+                            <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm z-10">
+                              <tr>
+                                <th className="px-2 py-2 text-muted-foreground/60 font-normal w-8 border-r border-b border-border text-center">#</th>
+                                {editedImport[editingSheet].headers.map((h, hi) => (
+                                  <th key={hi} className="px-1 py-1 border-b border-r border-border font-medium min-w-[90px]">
+                                    {editingHeader === `${editingSheet}:${hi}` ? (
+                                      <input
+                                        autoFocus
+                                        defaultValue={h}
+                                        onBlur={e => { renameHeader(editingSheet, hi, e.target.value); setEditingHeader(null); }}
+                                        onKeyDown={e => {
+                                          if (e.key === "Enter") e.currentTarget.blur();
+                                          if (e.key === "Escape") setEditingHeader(null);
+                                        }}
+                                        className="w-full bg-white border border-primary rounded px-1.5 py-0.5 text-xs focus:outline-none font-semibold"
+                                      />
+                                    ) : (
+                                      <button
+                                        onClick={() => setEditingHeader(`${editingSheet}:${hi}`)}
+                                        title="Click to rename column"
+                                        className="w-full text-left px-1.5 py-0.5 hover:bg-primary/10 rounded font-semibold text-foreground truncate block"
+                                      >
+                                        {h}
+                                      </button>
+                                    )}
+                                  </th>
+                                ))}
+                                <th className="px-2 py-2 border-b border-border w-8" />
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {editedImport[editingSheet].rows.map((row, ri) => (
+                                <tr key={ri} className="border-b border-border/50 hover:bg-muted/30 group">
+                                  <td className="px-2 py-1 text-muted-foreground/40 text-center border-r border-border/40 select-none">{ri + 1}</td>
+                                  {editedImport[editingSheet].headers.map((h, hi) => {
+                                    const isEditing = editingCell?.row === ri && editingCell?.col === h;
+                                    return (
+                                      <td key={hi} className="px-0.5 py-0.5 border-r border-border/40">
+                                        {isEditing ? (
+                                          <input
+                                            autoFocus
+                                            defaultValue={row[h] ?? ""}
+                                            onBlur={e => { updateCell(editingSheet, ri, h, e.target.value); setEditingCell(null); }}
+                                            onKeyDown={e => {
+                                              if (e.key === "Enter") e.currentTarget.blur();
+                                              if (e.key === "Escape") { setEditingCell(null); }
+                                              if (e.key === "Tab") {
+                                                e.preventDefault();
+                                                e.currentTarget.blur();
+                                                const next = editedImport[editingSheet].headers[hi + 1];
+                                                if (next) setEditingCell({ row: ri, col: next });
+                                                else if (ri + 1 < editedImport[editingSheet].rows.length)
+                                                  setEditingCell({ row: ri + 1, col: editedImport[editingSheet].headers[0] });
+                                              }
+                                            }}
+                                            className="w-full bg-white border border-primary rounded px-1.5 py-0.5 text-xs focus:outline-none"
+                                          />
+                                        ) : (
+                                          <button
+                                            onClick={() => setEditingCell({ row: ri, col: h })}
+                                            title={row[h] || undefined}
+                                            className="w-full text-left px-1.5 py-0.5 hover:bg-primary/10 rounded truncate block max-w-[140px]"
+                                          >
+                                            {row[h] !== "" ? row[h] : <span className="text-muted-foreground/30">—</span>}
+                                          </button>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="px-1 py-1 text-center">
+                                    <button
+                                      onClick={() => deleteRow(editingSheet, ri)}
+                                      title="Delete row"
+                                      className="opacity-0 group-hover:opacity-100 text-muted-foreground/40 hover:text-red-500 transition-all text-sm leading-none"
+                                    >×</button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+
+                      {/* Add row + row count */}
+                      {editingSheet && editedImport[editingSheet] && (
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            onClick={() => addRow(editingSheet)}
+                            className="text-xs text-muted-foreground hover:text-foreground border border-dashed border-muted-foreground/30 hover:border-muted-foreground/60 rounded-lg px-3 py-1.5 transition-colors"
+                          >
+                            + Add row
+                          </button>
+                          <span className="text-xs text-muted-foreground">
+                            {editedImport[editingSheet].rows.length} row{editedImport[editingSheet].rows.length !== 1 ? "s" : ""}
+                            {" · "}{editedImport[editingSheet].headers.length} column{editedImport[editingSheet].headers.length !== 1 ? "s" : ""}
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No recognised entity data found in this file.</p>
+                  )}
+
+                  {/* Options + actions */}
+                  <div className="border-t border-border pt-3 space-y-3">
+                    <label className="flex items-center gap-2.5 text-sm cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={clearFirst}
+                        onChange={e => setClearFirst(e.target.checked)}
+                        className="accent-red-600 size-4"
+                      />
+                      <span>
+                        <span className="font-medium text-red-600">Clear existing data</span> before importing
+                      </span>
+                    </label>
+                    {clearFirst && (
+                      <p className="text-xs text-red-500 flex items-center gap-1">
+                        <AlertTriangle className="size-3" />
+                        All current records will be deleted before the import runs. This cannot be undone.
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleImport}
+                        disabled={loading === "import" || Object.keys(editedImport).length === 0}
+                        className="flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {loading === "import"
+                          ? <div className="size-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                          : <Upload className="size-4" />}
+                        {loading === "import" ? "Importing…" : "Confirm Import"}
+                      </button>
+                      <button
+                        onClick={() => { setImportPreview(null); setClearFirst(false); }}
+                        className="px-4 py-2.5 rounded-lg text-sm font-medium border hover:bg-muted transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
       </Tabs>
     </div>
   );
