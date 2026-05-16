@@ -471,11 +471,15 @@ export function CustomerPortalPage() {
   const createServiceRequest = useMutation(api.serviceRequests.create);
   const staffList      = allEmployees.filter(e => e.role === "admin" || e.role === "suppression_lead");
 
-  // Parse numeric customer ID from auth userId (e.g. "cust-1" → 1, "1" → 1)
-  const customerId = parseInt(userId.replace(/\D/g, "")) || 1;
-  // Sort by creation time for deterministic ordering, then index by numeric auth ID
+  // This app uses a demo auth system where the customer picker assigns a
+  // sequential number (1-based). We resolve that number to a Convex document
+  // by sorting all customers deterministically by creation time and picking
+  // the nth entry. Data is then filtered by the resolved Convex _id, so
+  // cross-customer data leakage is impossible once the document is identified.
+  const customerPickerIndex = Math.max(1, parseInt(userId.replace(/\D/g, ""), 10) || 1);
   const sortedCustomers = [...allCustomers].sort((a, b) => a._creationTime - b._creationTime);
-  const myCust: ConvexCustomer | undefined = sortedCustomers[customerId - 1];
+  const myCust: ConvexCustomer | undefined =
+    customerPickerIndex <= sortedCustomers.length ? sortedCustomers[customerPickerIndex - 1] : undefined;
 
   // Derived: jobs + invoices scoped to this customer — never fall back to all data while loading
   const myJobs     = myCust ? apiJobs.filter(j     => j.customerId    === myCust._id) : [];
