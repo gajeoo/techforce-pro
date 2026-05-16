@@ -38,7 +38,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/contexts/AuthContext";
-import { getEmployees, type ApiEmployee } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import {
   clearLicenses,
   deleteLicense,
@@ -422,36 +423,22 @@ export function LicensesPage() {
   const role   = user?.role ?? "manager";
   const userId = user?.id ?? "";
 
-  const [apiEmployees, setApiEmployees] = useState<ApiEmployee[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [, setTick] = useState(0);
-
+  const allEmployees  = (useQuery(api.employees.list) ?? []) as any[];
+  const apiEmployees  = allEmployees.filter((e: any) => e.isActive);
+  const [, setTick]   = useState(0);
   function refresh() { setTick(t => t + 1); }
 
-  useEffect(() => {
-    getEmployees()
-      .then(emps => {
-        const active = emps.filter(e => e.isActive);
-        setApiEmployees(active);
-        if (active.length === 0) {
-          // No employees in the system — wipe any stale license localStorage
-          // so orphaned seeds from a previous demo don't show up as "9 across 0 techs"
-          clearLicenses();
-        } else {
-          // Seed licenses AFTER we know real employee IDs so the keys match
-          seedLicensesIfNeeded(active.map(e => String(e.id)));
-        }
-        // Force re-render so KPI stats reflect freshly-seeded / cleared data
-        refresh();
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+  // Seed licenses when employees load
+  if (apiEmployees.length > 0) {
+    seedLicensesIfNeeded(apiEmployees.map((e: any) => String(e._id ?? e.id)));
+  } else if (allEmployees.length > 0 && apiEmployees.length === 0) {
+    clearLicenses();
+  }
 
   // Only count licenses for employees that actually exist in the DB.
   // This prevents orphaned localStorage entries from inflating KPI numbers
   // when the system has been cleared.
-  const knownEmpIds  = new Set(apiEmployees.map(e => String(e.id)));
+  const knownEmpIds  = new Set(apiEmployees.map((e: any) => String(e._id ?? e.id)));
   const allLicenses  = apiEmployees.length === 0
     ? []
     : loadLicenses().filter(l => knownEmpIds.has(l.empId));
@@ -460,7 +447,7 @@ export function LicensesPage() {
   // Technician view — show their own licenses only
   if (role === "technician") {
     const empId = String(userId);
-    const me = apiEmployees.find(e => String(e.id) === empId);
+    const me = apiEmployees.find(e => String(e._id ?? e.id) === empId);
     return (
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -503,7 +490,7 @@ export function LicensesPage() {
             <div className="text-[10px] font-semibold text-muted-foreground uppercase mb-1">Total Licenses</div>
             <div className="text-2xl font-extrabold">{allLicenses.length}</div>
             <div className="text-[10px] text-muted-foreground">
-              across {loading ? "…" : techs.length} techs
+              across {(!apiEmployees.length) ? "…" : techs.length} techs
             </div>
           </CardContent>
         </Card>
@@ -545,7 +532,7 @@ export function LicensesPage() {
       </div>
 
       {/* Loading */}
-      {loading && (
+      {(!apiEmployees.length) && (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="size-5 animate-spin text-muted-foreground mr-2" />
           <span className="text-sm text-muted-foreground">Loading employees…</span>
@@ -553,7 +540,7 @@ export function LicensesPage() {
       )}
 
       {/* Per-tech tabs */}
-      {!loading && techs.length === 0 && (
+      {apiEmployees.length > 0 && techs.length === 0 && (
         <Card>
           <CardContent className="py-12 text-center">
             <FileBadge className="size-8 text-muted-foreground mx-auto mb-2" />
@@ -562,12 +549,12 @@ export function LicensesPage() {
         </Card>
       )}
 
-      {!loading && techs.length > 0 && (
+      {techs.length > 0 && (
         <Tabs defaultValue={firstId} className="w-full">
           <div className="overflow-x-auto">
             <TabsList className="h-9 w-max min-w-full sm:w-auto">
               {techs.map(emp => {
-                const empId    = String(emp.id);
+                const empId    = String(emp._id ?? emp._id ?? emp.id);
                 const empLicenses = getLicensesForEmp(empId);
                 const expCount    = empLicenses.filter(l => getExpiryStatus(l.expiryDate) !== "ok").length;
                 return (
@@ -590,7 +577,7 @@ export function LicensesPage() {
           </div>
 
           {techs.map(emp => {
-            const empId = String(emp.id);
+            const empId = String(emp._id ?? emp._id ?? emp.id);
             return (
               <TabsContent key={empId} value={empId} className="mt-4">
                 <Card className="mb-4">
