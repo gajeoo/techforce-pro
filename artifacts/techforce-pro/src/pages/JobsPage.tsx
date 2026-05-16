@@ -15,10 +15,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import {
   getJobs, getReturnJobs, getRescheduleJobs, getCustomers, getEmployees,
-  getCustomerLocations, createJob, updateJob,
+  getCustomerLocations, createJob, createOpenJob, updateJob,
   serviceTypeLabel, jobStatusIcon, roleLabel, initials,
   type ApiJob, type ApiCustomer, type ApiEmployee, type ApiCustomerLocation,
 } from "@/lib/api";
+import { Checkbox } from "@/components/ui/checkbox";
 import { saveNCNotice } from "@/lib/nonCompliance";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
@@ -406,6 +407,7 @@ export function JobsPage() {
   };
   const [form, setForm]                 = useState(emptyForm);
   const [formSaving, setFormSaving]     = useState(false);
+  const [isOpenJob, setIsOpenJob]       = useState(false);
   const [locations, setLocations]       = useState<ApiCustomerLocation[]>([]);
   const [locsLoading, setLocsLoading]   = useState(false);
 
@@ -492,27 +494,43 @@ export function JobsPage() {
     }
     setFormSaving(true);
     try {
-      const newJob = await createJob({
-        customerId: Number(form.customerId),
-        locationId: form.locationId ? Number(form.locationId) : null,
-        locationName: form.locationName || null,
-        employeeId: form.employeeId ? Number(form.employeeId) : null,
-        serviceType: form.serviceType,
-        priority: form.priority,
-        scheduledDate: form.scheduledDate || null,
-        dueDate: form.dueDate || null,
-        scheduledTime: form.scheduledTime || null,
-        revenue: Number(form.revenue) || 0,
-        status: "pending",
-        notes: form.notes || null,
-      });
-      setAllJobs(prev => [newJob, ...prev]);
+      if (isOpenJob) {
+        const customer = customers.find(c => String(c.id) === form.customerId);
+        const location = locations.find(l => String(l.id) === form.locationId);
+        await createOpenJob({
+          title: serviceTypeLabel(form.serviceType),
+          clientName: customer?.name ?? "Unknown",
+          clientAddress: location?.address ?? customer?.address ?? null,
+          zipCode: null,
+          certRequired: "any",
+          priority: form.priority,
+          notes: form.notes || null,
+        });
+        toast.success("Posted to Open Jobs queue");
+      } else {
+        const newJob = await createJob({
+          customerId: Number(form.customerId),
+          locationId: form.locationId ? Number(form.locationId) : null,
+          locationName: form.locationName || null,
+          employeeId: form.employeeId ? Number(form.employeeId) : null,
+          serviceType: form.serviceType,
+          priority: form.priority,
+          scheduledDate: form.scheduledDate || null,
+          dueDate: form.dueDate || null,
+          scheduledTime: form.scheduledTime || null,
+          revenue: Number(form.revenue) || 0,
+          status: "pending",
+          notes: form.notes || null,
+        });
+        setAllJobs(prev => [newJob, ...prev]);
+        toast.success("Job created");
+      }
       setCreateOpen(false);
       setForm(emptyForm);
+      setIsOpenJob(false);
       setLocations([]);
-      toast.success("Job created");
     } catch {
-      toast.error("Failed to create job");
+      toast.error(isOpenJob ? "Failed to post open job" : "Failed to create job");
     } finally {
       setFormSaving(false);
     }
@@ -574,7 +592,7 @@ export function JobsPage() {
             {allJobs.length} jobs · ${totalRevenue.toLocaleString()} revenue · {completedCount} completed
           </p>
         </div>
-        <Dialog open={createOpen} onOpenChange={open => { setCreateOpen(open); if (!open) { setForm(emptyForm); setLocations([]); } }}>
+        <Dialog open={createOpen} onOpenChange={open => { setCreateOpen(open); if (!open) { setForm(emptyForm); setIsOpenJob(false); setLocations([]); } }}>
           <DialogTrigger asChild>
             <Button size="sm" className="gap-1.5 self-start sm:self-auto">
               <Plus className="size-3.5" /> Create Job
@@ -707,10 +725,31 @@ export function JobsPage() {
                 <Textarea placeholder="Job notes…" rows={2} className="mt-1" value={form.notes} onChange={e => setField("notes", e.target.value)} />
               </div>
 
+              {/* Post as Open Job toggle */}
+              <div className={`rounded-lg border p-3 flex items-start gap-3 cursor-pointer transition-colors ${isOpenJob ? "border-primary/50 bg-primary/5" : "border-border/60 bg-muted/20"}`}
+                onClick={() => setIsOpenJob(v => !v)}
+              >
+                <Checkbox
+                  id="post-as-open-job"
+                  checked={isOpenJob}
+                  onCheckedChange={checked => setIsOpenJob(!!checked)}
+                  onClick={e => e.stopPropagation()}
+                  className="mt-0.5"
+                />
+                <div>
+                  <Label htmlFor="post-as-open-job" className="text-sm font-medium cursor-pointer">Post as Open Job</Label>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Instead of scheduling immediately, add this to the Open Jobs queue for a tech to be assigned later. Scheduling fields will be ignored.
+                  </p>
+                </div>
+              </div>
+
               <div className="flex justify-end gap-2 pt-1">
                 <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
                 <Button onClick={handleCreateJob} disabled={formSaving || !form.customerId}>
-                  {formSaving ? "Creating…" : "Create Job"}
+                  {formSaving
+                    ? (isOpenJob ? "Posting…" : "Creating…")
+                    : (isOpenJob ? "Post to Open Jobs" : "Create Job")}
                 </Button>
               </div>
             </div>
