@@ -463,23 +463,31 @@ export function CustomerPortalPage() {
   const userName = user?.name ?? "Customer";
 
   // ── Real data from Convex ──
-  const allEmployees   = (useQuery(api.employees.list) ?? []) as ConvexEmployee[];
-  const allCustomers   = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
-  const apiJobs        = (useQuery(api.jobs.list)       ?? []) as ConvexJob[];
-  const apiInvoices    = (useQuery(api.invoices.list)   ?? []) as ConvexInvoice[];
-  const convexRequests = (useQuery(api.serviceRequests.list, {}) ?? []) as ConvexServiceRequest[];
-  const createServiceRequest = useMutation(api.serviceRequests.create);
-  const staffList      = allEmployees.filter(e => e.role === "admin" || e.role === "suppression_lead");
+  const allEmployees = (useQuery(api.employees.list) ?? []) as ConvexEmployee[];
+  const allCustomers = (useQuery(api.customers.list) ?? []) as ConvexCustomer[];
+  const apiJobs      = (useQuery(api.jobs.list)      ?? []) as ConvexJob[];
+  const apiInvoices  = (useQuery(api.invoices.list)  ?? []) as ConvexInvoice[];
 
   // This app uses a demo auth system where the customer picker assigns a
   // sequential number (1-based). We resolve that number to a Convex document
   // by sorting all customers deterministically by creation time and picking
-  // the nth entry. Data is then filtered by the resolved Convex _id, so
+  // the nth entry. Data is then filtered by the resolved Convex _id so
   // cross-customer data leakage is impossible once the document is identified.
+  // myCust is computed here — before the service-requests query — so the query
+  // can be scoped to this customer's ID and never returns another account's data.
   const customerPickerIndex = Math.max(1, parseInt(userId.replace(/\D/g, ""), 10) || 1);
   const sortedCustomers = [...allCustomers].sort((a, b) => a._creationTime - b._creationTime);
   const myCust: ConvexCustomer | undefined =
     customerPickerIndex <= sortedCustomers.length ? sortedCustomers[customerPickerIndex - 1] : undefined;
+
+  // Service requests are scoped to myCust._id. "skip" keeps the query inactive
+  // while allCustomers is still loading, preventing cross-account data exposure.
+  const convexRequests = (useQuery(
+    api.serviceRequests.list,
+    myCust ? { customerId: myCust._id } : "skip",
+  ) ?? []) as ConvexServiceRequest[];
+  const createServiceRequest = useMutation(api.serviceRequests.create);
+  const staffList = allEmployees.filter(e => e.role === "admin" || e.role === "suppression_lead");
 
   // Derived: jobs + invoices scoped to this customer — never fall back to all data while loading
   const myJobs     = myCust ? apiJobs.filter(j     => j.customerId    === myCust._id) : [];
