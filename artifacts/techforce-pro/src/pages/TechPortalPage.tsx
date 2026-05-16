@@ -1,5 +1,7 @@
+import { initials, serviceTypeLabel } from "@/lib/utils";
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";import {
+import { useNavigate } from "react-router-dom";
+import {
   CalendarOff,
   Camera,
   Check,
@@ -33,7 +35,9 @@ import {
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-import { getJobs, getOpenJobs, getEmployees, initials, serviceTypeLabel, type ApiJob, type ApiEmployee, type ApiOpenJob } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+
 import { useAuth } from "@/contexts/AuthContext";
 import { LicenseAlertBanner } from "@/components/LicenseAlertBanner";
 import {
@@ -118,11 +122,11 @@ function getStatusStripColor(status: TechStatus) {
   return map[status];
 }
 
-// ─── Synthesize ApiJob from ApiOpenJob ───────────────────────────────────
+// ─── Synthesize any from any ───────────────────────────────────
 
-function openJobToApiJob(oj: ApiOpenJob, empId: number): ApiJob {
+function openJobToany(oj: any, empId: any): any {
   return {
-    id: -(oj.id),            // negative IDs for open jobs to avoid collision
+    id: -(Number(oj.id) || 0),            // negative IDs for open jobs to avoid collision
     customerId: 0,
     employeeId: empId,
     serviceType: oj.certRequired ?? "inspection",
@@ -153,38 +157,31 @@ export function TechPortalPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [employees, setEmployees] = useState<ApiEmployee[]>([]);
-  const [jobs,      setJobs]      = useState<ApiJob[]>([]);
-  const [openJobs,  setOpenJobs]  = useState<ApiOpenJob[]>([]);
-  const [todayOff, setTodayOff]   = useState<{ id: number; employeeName: string; type: string }[]>([]);
+  const employees = (useQuery(api.employees.list)  ?? []) as any[];
+  const jobs      = (useQuery(api.jobs.list)        ?? []) as any[];
+  const openJobs  = (useQuery(api.openJobs.list)    ?? []) as any[];
+  const timeoffs  = (useQuery(api.timeoff.list)     ?? []) as any[];
+  const today     = new Date().toISOString().slice(0, 10);
+  const todayOff  = timeoffs.filter((t: any) => t.status === "approved" && t.startDate <= today && t.endDate >= today);
 
-  useEffect(() => {
-    getEmployees().then(setEmployees).catch(() => {});
-    getJobs().then(setJobs).catch(() => {});
-    getOpenJobs().then(setOpenJobs).catch(() => {});
-    const today = new Date().toISOString().slice(0, 10);
-    fetch(`/api/time-off?status=approved&date=${today}`)
-      .then(r => r.ok ? r.json() : []).then(setTodayOff).catch(() => {});
-  }, []);
-
-  const currentTech = employees.find(e => String(e.id) === user?.id) ?? employees[0];
+  const currentTech = employees.find(e => String(e._id ?? e.id) === user?.id) ?? employees[0];
 
   // Filter regular jobs assigned to this tech
-  const regularJobs: ApiJob[] = (() => {
+  const regularJobs: any[] = (() => {
     if (!currentTech) return [];
-    const filtered = jobs.filter(j => j.employeeId === currentTech.id);
+    const filtered = jobs.filter(j => String(j.employeeId) === String(currentTech._id ?? currentTech.id));
     return filtered;
   })();
 
   // Use API-based open job assignments (assignedEmployeeId is set by the API)
-  const assignedOpenJobs: ApiJob[] = currentTech
+  const assignedOpenJobs: any[] = currentTech
     ? openJobs
-        .filter(oj => oj.assignedEmployeeId === currentTech.id)
-        .map(oj => openJobToApiJob(oj, currentTech.id))
+        .filter(oj => String(oj.assignedEmployeeId) === String(currentTech._id ?? currentTech.id))
+        .map(oj => openJobToany(oj, currentTech.id))
     : [];
 
   // Combine regular jobs + assigned open jobs; fallback to first 4 jobs if none
-  const myJobs: ApiJob[] = (() => {
+  const myJobs: any[] = (() => {
     const combined = [...regularJobs, ...assignedOpenJobs];
     if (combined.length > 0) return combined;
     // Fallback: show first few jobs so the tech portal isn't empty in demo
@@ -209,53 +206,14 @@ export function TechPortalPage() {
     }
     return "—";
   });
-
-  // Live digital clock
-  const [liveTime, setLiveTime] = useState(() =>
-    new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" }),
-  );
-  useEffect(() => {
-    const t = setInterval(
-      () => setLiveTime(new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" })),
-      1000,
-    );
-    return () => clearInterval(t);
-  }, []);
-
-  const [completingJob, setCompletingJob] = useState<ApiJob | null>(null);
+  const [completingJob, setCompletingJob] = useState<any | null>(null);
   const [completeOpen, setCompleteOpen] = useState(false);
 
   // Completion form state
   const [compNotes, setCompNotes] = useState("");
   const [compDeficiencies, setCompDeficiencies] = useState("");
-  const [compChecklist, setCompChecklist] = useState<Record<string, boolean>>({});
 
   const completedCount = myJobs.filter(j => (statuses[String(j.id)] ?? jobStatusToTechStatus(j.status)) === "completed").length;
-
-  // Service-specific completion checklists
-  function getChecklist(serviceType: string): string[] {
-    const base = [
-      "Customer site confirmed and accessible",
-      "PPE / safety equipment worn",
-      "Work completed per service order",
-      "Area cleaned and secured",
-      "Customer or site rep notified",
-    ];
-    const extra: Record<string, string[]> = {
-      hood_suppression:        ["Nozzle coverage verified", "System pressure within spec", "Grease build-up noted", "Ansul tag affixed"],
-      suppression:             ["Nozzle coverage verified", "System pressure within spec", "Ansul tag affixed"],
-      extinguisher_inspection: ["Agent weight/pressure confirmed", "Pin & tamper seal intact", "Service tag updated", "Mounted securely"],
-      extinguisher:            ["Agent weight/pressure confirmed", "Pin & tamper seal intact", "Service tag updated"],
-      sprinkler_test:          ["Flow test completed", "Inspector's test valve closed", "Gauges read correctly", "No leaks observed"],
-      sprinkler:               ["Flow test completed", "Inspector's test valve closed", "No leaks observed"],
-      fire_alarm:              ["All initiating devices tested", "Notification appliances verified", "Panel in normal condition", "UL cert attached"],
-      fire_alarm_test:         ["All initiating devices tested", "Notification appliances verified", "Panel in normal condition"],
-      backflow_test:           ["Test cocks opened/closed per procedure", "Pressure differential recorded", "Test report completed"],
-      exit_light_check:        ["All exit signs illuminated", "Battery backup tested", "Emergency lights functional"],
-      standpipe_test:          ["Hose connections tested", "Pressure at roof outlet verified", "Flow test completed"],
-    };
-    return [...base, ...(extra[serviceType] ?? [])];
-  }
 
   function updateStatus(jobId: string, next: TechStatus) {
     const updated = { ...statuses, [jobId]: next };
@@ -263,7 +221,7 @@ export function TechPortalPage() {
     saveStatuses(updated);
   }
 
-  function advanceStatus(job: ApiJob) {
+  function advanceStatus(job: any) {
     const current = statuses[String(job.id)] ?? jobStatusToTechStatus(job.status);
     const idx = STATUS_ORDER.indexOf(current);
     if (idx >= STATUS_ORDER.length - 1) return;
@@ -272,9 +230,6 @@ export function TechPortalPage() {
       setCompletingJob(job);
       setCompNotes("");
       setCompDeficiencies("");
-      // Initialize checklist — all unchecked
-      const items = getChecklist(job.serviceType);
-      setCompChecklist(Object.fromEntries(items.map(i => [i, false])));
       setCompleteOpen(true);
       return;
     }
@@ -345,9 +300,8 @@ export function TechPortalPage() {
               <div className={`size-3 rounded-full ${clockedIn ? "bg-emerald-500 animate-pulse" : "bg-gray-400"}`} />
               <span className="text-sm font-bold">{clockedIn ? `In since ${clockTime}` : "Clocked Out"}</span>
             </div>
-            <div className="text-base font-mono font-bold tabular-nums text-primary mt-1">{liveTime}</div>
             {clockedIn && (
-              <div className="text-[10px] text-muted-foreground mt-0.5 flex items-center gap-1">
+              <div className="text-[10px] text-muted-foreground mt-1 flex items-center gap-1">
                 <MapPin className="size-2.5" /> {clockLocation}
               </div>
             )}
@@ -561,9 +515,9 @@ export function TechPortalPage() {
         </Card>
       </div>
 
-      {/* Complete Job Dialog — with service checklist */}
+      {/* Complete Job Dialog */}
       <Dialog open={completeOpen} onOpenChange={o => !o && setCompleteOpen(false)}>
-        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <CheckCircle2 className="size-5 text-emerald-600" />
@@ -571,40 +525,6 @@ export function TechPortalPage() {
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            {/* Service type badge */}
-            {completingJob && (
-              <div className="text-xs text-muted-foreground bg-muted/50 rounded-lg px-3 py-2">
-                <span className="font-semibold">Service: </span>{serviceTypeLabel(completingJob.serviceType)}
-              </div>
-            )}
-
-            {/* Completion checklist */}
-            {Object.keys(compChecklist).length > 0 && (
-              <div>
-                <Label className="text-xs font-semibold mb-2 block">
-                  Completion Checklist
-                  <span className="ml-2 font-normal text-muted-foreground">
-                    {Object.values(compChecklist).filter(Boolean).length}/{Object.keys(compChecklist).length} done
-                  </span>
-                </Label>
-                <div className="space-y-1.5 bg-muted/30 rounded-lg p-3">
-                  {Object.entries(compChecklist).map(([item, checked]) => (
-                    <label key={item} className="flex items-start gap-2.5 cursor-pointer group">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={e => setCompChecklist(prev => ({ ...prev, [item]: e.target.checked }))}
-                        className="mt-0.5 size-3.5 rounded accent-emerald-600 cursor-pointer"
-                      />
-                      <span className={`text-xs leading-tight transition-colors ${checked ? "line-through text-muted-foreground" : "text-foreground group-hover:text-primary"}`}>
-                        {item}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-
             <div>
               <Label className="text-xs font-semibold">Completion Notes</Label>
               <Textarea
@@ -616,7 +536,7 @@ export function TechPortalPage() {
               />
             </div>
             <div>
-              <Label className="text-xs font-semibold">Deficiencies Found <span className="font-normal text-muted-foreground">(optional)</span></Label>
+              <Label className="text-xs font-semibold">Deficiencies Found (optional)</Label>
               <Textarea
                 className="mt-1 text-sm resize-none"
                 rows={2}
@@ -630,22 +550,14 @@ export function TechPortalPage() {
                 <Upload className="size-3.5" /> <span>Photo upload: available in full desktop portal</span>
               </div>
               <div className="flex items-center gap-2">
-                <Camera className="size-3.5" /> <span>Certificate will be auto-generated on completion</span>
+                <Camera className="size-3.5" /> <span>Certificate will be auto-generated</span>
               </div>
             </div>
             <div className="flex gap-2">
-              <button
-                className="flex-1 border border-input rounded-md px-3 py-2 text-sm hover:bg-muted/50 transition-colors"
-                onClick={() => setCompleteOpen(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="flex-1 gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md px-3 py-2 text-sm font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
-                onClick={confirmComplete}
-              >
+              <Button variant="outline" className="flex-1" onClick={() => setCompleteOpen(false)}>Cancel</Button>
+              <Button className="flex-1 gap-1.5 bg-emerald-600 hover:bg-emerald-700" onClick={confirmComplete}>
                 <CheckCircle2 className="size-4" /> Mark Complete
-              </button>
+              </Button>
             </div>
           </div>
         </DialogContent>
