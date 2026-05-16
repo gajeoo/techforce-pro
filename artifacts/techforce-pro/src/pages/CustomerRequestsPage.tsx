@@ -14,7 +14,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
-import { getCustomers, type ApiCustomer } from "@/lib/api";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
 
 const API = "/api";
 
@@ -62,7 +63,7 @@ export function CustomerRequestsPage() {
   const [tab, setTab]             = useState<"all" | ReqStatus>("all");
   const [reviewing, setReviewing] = useState<ServiceRequest | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [customers, setCustomers] = useState<ApiCustomer[]>([]);
+  const customers = (useQuery(api.customers.list) ?? []) as any[];
   const [saving, setSaving]       = useState(false);
   const [reviewForm, setReviewForm] = useState({ status: "in-review" as ReqStatus, managerMessage: "" });
 
@@ -75,9 +76,7 @@ export function CustomerRequestsPage() {
   }, []);
 
   useEffect(() => {
-    load();
-    getCustomers().then(setCustomers).catch(() => {});
-  }, [load]);
+    load();  }, [load]);
 
   function openReview(req: ServiceRequest) {
     setReviewing(req);
