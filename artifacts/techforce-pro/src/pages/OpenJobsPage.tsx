@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   Bot, Briefcase, Camera, CheckCircle2, ChevronDown, Clock,
   DollarSign, FileText, History, Image as ImageIcon,
-  MapPin, RefreshCw, Search, ArrowUpDown,
+  MapPin, Plus, RefreshCw, Search, ArrowUpDown,
   Sparkles, User, UserCheck, X, Zap, CalendarDays,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -15,11 +15,13 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import {
-  getOpenJobs, getEmployees, updateJob, initials,
+  getOpenJobs, getEmployees, updateJob, createOpenJob, initials,
   type ApiOpenJob, type ApiEmployee,
 } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
+import { toast } from "sonner";
 
 type Priority     = "high" | "medium" | "low";
 type AssignFilter = "all" | "assigned" | "unassigned";
@@ -284,6 +286,43 @@ export function OpenJobsPage() {
   const [assignDialog, setAssignDialog] = useState<AssignTarget | null>(null);
   const [assignDialogOpen, setAssignDialogOpen] = useState(false);
 
+  // Add Open Job dialog
+  const emptyAddForm = { title: "", clientName: "", clientAddress: "", zipCode: "", certRequired: "any", priority: "medium", notes: "" };
+  const [addOpen, setAddOpen]   = useState(false);
+  const [addForm, setAddForm]   = useState(emptyAddForm);
+  const [addSaving, setAddSaving] = useState(false);
+
+  function setAddField(k: keyof typeof emptyAddForm, v: string) {
+    setAddForm(prev => ({ ...prev, [k]: v }));
+  }
+
+  async function handleAddOpenJob() {
+    if (!addForm.title.trim() || !addForm.clientName.trim()) {
+      toast.error("Title and client name are required");
+      return;
+    }
+    setAddSaving(true);
+    try {
+      const newJob = await createOpenJob({
+        title: addForm.title.trim(),
+        clientName: addForm.clientName.trim(),
+        clientAddress: addForm.clientAddress.trim() || null,
+        zipCode: addForm.zipCode.trim() || null,
+        certRequired: addForm.certRequired,
+        priority: addForm.priority,
+        notes: addForm.notes.trim() || null,
+      });
+      setOpenJobs(prev => [newJob, ...prev]);
+      setAddOpen(false);
+      setAddForm(emptyAddForm);
+      toast.success("Open job created");
+    } catch {
+      toast.error("Failed to create open job");
+    } finally {
+      setAddSaving(false);
+    }
+  }
+
   const reload = useCallback(async () => {
     const [jobs, emps] = await Promise.all([getOpenJobs(), getEmployees()]);
     setOpenJobs(jobs);
@@ -408,7 +447,10 @@ export function OpenJobsPage() {
           </p>
         </div>
         {isManager && (
-          <div className="flex gap-2 self-start sm:self-auto">
+          <div className="flex gap-2 self-start sm:self-auto flex-wrap">
+            <Button size="sm" className="gap-1.5" onClick={() => setAddOpen(true)}>
+              <Plus className="size-3.5" /> Add Open Job
+            </Button>
             <Button
               variant={bulkDone ? "outline" : "default"}
               size="sm"
@@ -919,6 +961,109 @@ export function OpenJobsPage() {
           await reload();
         }}
       />
+
+      {/* Add Open Job Dialog */}
+      <Dialog open={addOpen} onOpenChange={o => { setAddOpen(o); if (!o) setAddForm(emptyAddForm); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Plus className="size-4" /> Add Open Job
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-3">
+              <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1.5">
+                <Briefcase className="size-3.5" /> Job Info
+              </p>
+              <div>
+                <Label className="text-xs">Job Title *</Label>
+                <Input
+                  placeholder="e.g. Annual Fire Suppression Inspection"
+                  className="mt-1"
+                  value={addForm.title}
+                  onChange={e => setAddField("title", e.target.value)}
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Client Name *</Label>
+                <Input
+                  placeholder="e.g. Acme Corp"
+                  className="mt-1"
+                  value={addForm.clientName}
+                  onChange={e => setAddField("clientName", e.target.value)}
+                />
+              </div>
+              <div>
+                <Label className="text-xs flex items-center gap-1"><MapPin className="size-3" /> Client Address</Label>
+                <Input
+                  placeholder="e.g. 123 Main St, Baltimore MD"
+                  className="mt-1"
+                  value={addForm.clientAddress}
+                  onChange={e => setAddField("clientAddress", e.target.value)}
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Zip Code</Label>
+                <Input
+                  placeholder="e.g. 21046"
+                  className="mt-1 max-w-[120px]"
+                  value={addForm.zipCode}
+                  onChange={e => setAddField("zipCode", e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-3">
+              <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Requirements & Priority</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs">Cert Required</Label>
+                  <Select value={addForm.certRequired} onValueChange={v => setAddField("certRequired", v)}>
+                    <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">Any</SelectItem>
+                      <SelectItem value="suppression">Suppression</SelectItem>
+                      <SelectItem value="sprinkler">Sprinkler</SelectItem>
+                      <SelectItem value="extinguisher">Extinguisher</SelectItem>
+                      <SelectItem value="exit_lights">Exit Lights</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-xs">Priority</Label>
+                  <Select value={addForm.priority} onValueChange={v => setAddField("priority", v)}>
+                    <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="high">High</SelectItem>
+                      <SelectItem value="medium">Medium</SelectItem>
+                      <SelectItem value="low">Low</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <Label className="text-xs">Notes</Label>
+              <Textarea
+                placeholder="Any special instructions or context…"
+                rows={2}
+                className="mt-1"
+                value={addForm.notes}
+                onChange={e => setAddField("notes", e.target.value)}
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" onClick={() => { setAddOpen(false); setAddForm(emptyAddForm); }}>Cancel</Button>
+              <Button onClick={handleAddOpenJob} disabled={addSaving || !addForm.title.trim() || !addForm.clientName.trim()}>
+                {addSaving ? "Adding…" : "Add Open Job"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
