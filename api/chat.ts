@@ -1,5 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+const ALLOWED_ORIGINS = [
+  "https://techforce-pro.vercel.app",
+  "https://techforce-pro-gajeoos-projects.vercel.app",
+];
+
 const SYSTEM_PROMPT = `You are TechForce AI — an intelligent assistant for Multicorp Fire Protection Services, a commercial fire protection company based in Columbia, MD.
 
 You help with:
@@ -17,11 +22,30 @@ Company info:
 
 Be concise, professional, and proactive. If you are missing information to complete a task, ask for just what you need.`;
 
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 20;
+const ipHits = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = ipHits.get(ip);
+  if (!entry || now > entry.resetAt) {
+    ipHits.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= RATE_LIMIT_MAX) return false;
+  entry.count++;
+  return true;
+}
+
 export default async function handler(
   req: IncomingMessage & { body?: unknown },
   res: ServerResponse,
 ) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  const origin = req.headers["origin"] ?? "";
+  const allowedOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -34,6 +58,17 @@ export default async function handler(
   if (req.method !== "POST") {
     res.statusCode = 405;
     res.end("Method Not Allowed");
+    return;
+  }
+
+  const ip =
+    (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ??
+    "unknown";
+
+  if (!checkRateLimit(ip)) {
+    res.statusCode = 429;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Too many requests. Please wait a moment." }));
     return;
   }
 
@@ -50,10 +85,12 @@ export default async function handler(
 
   try {
     const body = req.body as { messages?: Array<{ role: string; content: string }> } | undefined;
-    const userMessages = (body?.messages ?? []).map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    }));
+    const userMessages = (body?.messages ?? [])
+      .slice(-20)
+      .map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: String(m.content).slice(0, 4000),
+      }));
 
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
